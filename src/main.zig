@@ -13,6 +13,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const nanoui = @import("nanoui");
+const objc = nanoui.objc;
 const mac = builtin.os.tag == .macos;
 const apps = @import("apps.zig");
 const Index = apps.Index;
@@ -39,6 +40,24 @@ const suggest_key = "nanolight.suggest";
 const searches_out_key = "nanolight.searches_out";
 /// "0": no menu bar icon (issue #8).
 const menu_bar_key = "nanolight.menu_bar";
+
+/// Popover panels are non-activating and at popup-menu level; macOS then
+/// composes pinyin in the field but won't show the input method's candidates.
+fn configurePanelForIme(w: *nanoui.Window) void {
+    if (!mac) return;
+    const nw = w.nswindow;
+    const pool = objc.Pool.push();
+    defer pool.pop();
+    const mask = objc.msg(objc.NSUInteger, nw, "styleMask", .{});
+    const nonactivating: objc.NSUInteger = 1 << 7;
+    if (mask & nonactivating != 0) objc.msg(void, nw, "setStyleMask:", .{mask & ~nonactivating});
+    if (objc.msg(objc.BOOL, nw, "isKindOfClass:", .{objc.class("NSPanel")})) {
+        objc.msg(void, nw, "setFloatingPanel:", .{objc.NO});
+        objc.msg(void, nw, "setBecomesKeyOnlyIfNeeded:", .{objc.NO});
+    }
+    // NSFloatingWindowLevel — above normal windows, below popup menu (101).
+    objc.msg(void, nw, "setLevel:", .{@as(objc.NSInteger, 3)});
+}
 
 pub fn applyChoice(ctx: *anyopaque, choice: shortcut.Choice) void {
     Live.apply(ctx, choice);
@@ -355,6 +374,7 @@ pub const Live = struct {
         panel.shown(w);
         // Key + front isn't enough for a menu bar app: without activating,
         // macOS won't attach the input method (no pinyin candidates).
+        configurePanelForIme(w);
         w.focus();
         l.through.start();
         if (l.acct) |*a| a.maybePull();
@@ -543,6 +563,7 @@ pub fn main(init: std.process.Init) !void {
     };
     panel.adjust(&options, app.flags.hidden, s.height());
     live.window = try app.newWindow(options);
+    if (live.window) |w| configurePanelForIme(w);
     if (app.flags.hidden) return app.run();
     // Raycast extensions' commands among the apps (never in headless runs:
     // they're this machine's).
