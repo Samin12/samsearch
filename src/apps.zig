@@ -168,6 +168,11 @@ pub const Index = struct {
         return null;
     }
 
+    pub fn findPath(ix: *const Index, path: []const u8) ?u32 {
+        for (ix.apps.items, 0..) |a, i| if (std.mem.eql(u8, a.path, path)) return @intCast(i);
+        return null;
+    }
+
     /// Up to `out.len` apps for an empty query: the most opened, else a
     /// few every Mac has.
     pub fn suggestions(ix: *const Index, out: []u32) usize {
@@ -207,19 +212,23 @@ pub const Index = struct {
     pub fn save(ix: *Index, kv: nanoui.kv.Store) void {
         var aw: std.Io.Writer.Allocating = .init(ix.gpa);
         defer aw.deinit();
-        for (ix.apps.items, ix.launches.items) |a, l| if (l > 0) aw.writer.print("{s}\t{d}\n", .{ a.name, l }) catch return;
+        for (ix.apps.items, ix.launches.items) |a, l| if (l > 0) aw.writer.print("{s}\t{d}\n", .{ a.path, l }) catch return;
         kv.set(store_key, aw.written()) catch {};
     }
 
-    /// The counts `opened` kept.
+    /// The counts `opened` kept. Keys are `.app` paths; older rows used
+    /// display names and are still read once.
     pub fn load(ix: *Index, store: nanoui.kv.Store) void {
         const v = (store.get(ix.gpa, store_key) catch null) orelse return;
         defer ix.gpa.free(v);
         var lines = std.mem.splitScalar(u8, v, '\n');
         while (lines.next()) |line| {
+            if (line.len == 0) continue;
             const tab = std.mem.indexOfScalar(u8, line, '\t') orelse continue;
-            const i = ix.find(line[0..tab]) orelse continue;
-            ix.launches.items[i] = std.fmt.parseInt(u16, line[tab + 1 ..], 10) catch 0;
+            const key = line[0..tab];
+            const count = std.fmt.parseInt(u16, line[tab + 1 ..], 10) catch 0;
+            const i = resolveLaunchKey(ix, key) orelse continue;
+            ix.launches.items[i] = count;
         }
     }
 
@@ -238,6 +247,11 @@ pub const Index = struct {
 };
 
 const store_key = "nanolight.launches";
+
+fn resolveLaunchKey(ix: *const Index, key: []const u8) ?u32 {
+    if (ix.findPath(key)) |i| return i;
+    return ix.find(key);
+}
 
 /// Opens the Mac app at `path` without waiting for it: LaunchServices
 /// answers when the app has started, which can take seconds (an app
@@ -348,4 +362,22 @@ test "a second look tells an app installed since from no change (#15)" {
     later.scan(t.io, home);
     try t.expect(!ix.same(&later));
     try t.expect(later.find("DOSBox-X") != null);
+}
+
+test "launch counts follow the app path when the display name changes" {
+    const t = std.testing;
+    var ix: Index = .init(t.allocator);
+    defer ix.deinit();
+    try ix.add("WeChat", "/Applications/WeChat.app");
+    const i = ix.findPath("/Applications/WeChat.app").?;
+    ix.opened(i, null);
+    ix.opened(i, null);
+    var mem: nanoui.kv.Memory = .{ .gpa = t.allocator };
+    defer mem.deinit();
+    ix.save(mem.store());
+    ix.apps.items[i].name = "微信";
+    ix.names.items[i] = "微信";
+    ix.launches.items[i] = 0;
+    ix.load(mem.store());
+    try t.expectEqual(@as(u16, 2), ix.launches.items[i]);
 }

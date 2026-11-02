@@ -4,6 +4,7 @@
 //!
 //!   zig build run            build and open it
 //!   zig build app            zig-out/Nanolight.app, for /Applications
+//!   zig build app -Doptimize=ReleaseSmall   ~1MB (default Debug is ~5MB)
 //!   zig build test           its search, math, suggestions and panel
 //!   zig build film           the walkthrough's renderer (tools/film.sh)
 //!   zig build promo          the promo's renderer (tools/promo.sh)

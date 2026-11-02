@@ -8,7 +8,12 @@
 //! count of the two, so what you open most anywhere comes up first.
 const std = @import("std");
 
-pub const Launch = struct { name: []const u8, count: u16 };
+pub const Launch = struct {
+    name: []const u8,
+    /// Stable across locales; empty in older synced records.
+    path: []const u8 = "",
+    count: u16,
+};
 
 pub const Settings = struct {
     v: u8 = 1,
@@ -42,9 +47,11 @@ pub fn merge(arena: std.mem.Allocator, local: Settings, remote: Settings, prefer
     var list: std.ArrayList(Launch) = .empty;
     for ([_][]const Launch{ local.launches, remote.launches }) |side| for (side) |l| {
         if (l.name.len == 0 or l.name.len > 255) continue;
+        if (l.path.len > 512) continue;
         for (list.items) |*have| {
-            if (std.mem.eql(u8, have.name, l.name)) {
+            if (launchSame(have.*, l)) {
                 have.count = @max(have.count, l.count);
+                if (have.path.len == 0 and l.path.len > 0) have.path = l.path;
                 break;
             }
         } else try list.append(arena, l);
@@ -52,7 +59,9 @@ pub fn merge(arena: std.mem.Allocator, local: Settings, remote: Settings, prefer
     // A steady order, so the same counts encode the same.
     std.sort.pdq(Launch, list.items, {}, struct {
         fn f(_: void, a: Launch, b: Launch) bool {
-            return std.mem.lessThan(u8, a.name, b.name);
+            const ak = launchSortKey(a);
+            const bk = launchSortKey(b);
+            return std.mem.lessThan(u8, ak, bk);
         }
     }.f);
     out.launches = list.items;
@@ -62,8 +71,18 @@ pub fn merge(arena: std.mem.Allocator, local: Settings, remote: Settings, prefer
 /// Whether the two say the same.
 pub fn same(a: Settings, b: Settings) bool {
     if (!std.mem.eql(u8, a.hotkey, b.hotkey) or a.suggest != b.suggest or a.at != b.at or a.launches.len != b.launches.len) return false;
-    for (a.launches, b.launches) |x, y| if (x.count != y.count or !std.mem.eql(u8, x.name, y.name)) return false;
+    for (a.launches, b.launches) |x, y| if (x.count != y.count or !launchSame(x, y)) return false;
     return true;
+}
+
+fn launchSame(a: Launch, b: Launch) bool {
+    if (a.path.len > 0 and b.path.len > 0) return std.mem.eql(u8, a.path, b.path);
+    return std.mem.eql(u8, a.name, b.name);
+}
+
+fn launchSortKey(l: Launch) []const u8 {
+    if (l.path.len > 0) return l.path;
+    return l.name;
 }
 
 test "two Macs merge: the later choice wins, and each app keeps its higher count" {
