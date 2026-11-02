@@ -23,6 +23,7 @@ const suggest = @import("suggest.zig");
 const Preview = @import("preview.zig").Preview;
 const single = @import("single.zig");
 const ClickThrough = @import("clickthrough.zig").ClickThrough;
+const Recorder = @import("recorder.zig").Recorder;
 const account = @import("account.zig");
 const Settings = @import("settings.zig").Settings;
 
@@ -30,6 +31,10 @@ const suggest_key = "nanolight.suggest";
 
 pub fn applyChoice(ctx: *anyopaque, choice: shortcut.Choice) void {
     Live.apply(ctx, choice);
+}
+
+pub fn recordKey(ctx: *anyopaque, on: bool) void {
+    Live.record(ctx, on);
 }
 
 pub fn loginItem(ctx: *anyopaque, set: ?bool) bool {
@@ -58,6 +63,8 @@ pub const Live = struct {
     preview: Preview = .{},
     /// Clicks outside the panel go to what is under it (clickthrough.zig).
     through: ClickThrough = .{},
+    /// A key of one's own, being recorded in Settings (recorder.zig).
+    recorder: Recorder = .{},
     /// The words Google is to be asked about once typing pauses, and how
     /// many pauses are still being waited out (only the last one asks).
     asking: [suggest.max_len]u8 = undefined,
@@ -112,7 +119,8 @@ pub const Live = struct {
         for (ix.apps.items, ix.launches.items) |a, n| if (n > 0) list.append(arena, .{ .name = a.name, .count = n }) catch break;
         var at: i64 = 0;
         if (l.kv.get(arena, sync_at_key) catch null) |v| at = std.fmt.parseInt(i64, v, 10) catch 0;
-        return .{ .hotkey = @tagName(l.choice), .suggest = l.s.suggest_on, .at = at, .launches = list.items };
+        const name = arena.create([32]u8) catch return .{ .hotkey = "cmd_space", .suggest = l.s.suggest_on, .at = at, .launches = list.items };
+        return .{ .hotkey = l.choice.name(name), .suggest = l.s.suggest_on, .at = at, .launches = list.items };
     }
 
     /// The account's settings, merged: the key, the suggestions, the counts.
@@ -120,7 +128,7 @@ pub const Live = struct {
         const l: *Live = @ptrCast(@alignCast(ctx));
         var at: [24]u8 = undefined;
         l.kv.set(sync_at_key, std.fmt.bufPrint(&at, "{d}", .{st.at}) catch "0") catch {};
-        if (std.meta.stringToEnum(shortcut.Choice, st.hotkey)) |c| if (c != l.choice) {
+        if (shortcut.Choice.parse(st.hotkey)) |c| if (!c.eql(l.choice)) {
             shortcut.save(l.kv, c);
             l.useKey(c);
         };
@@ -266,6 +274,7 @@ pub const Live = struct {
     fn keyChanged(ctx: *anyopaque, w: *nanoui.Window) void {
         const l: *Live = @ptrCast(@alignCast(ctx));
         if (w.isFocused()) return;
+        if (l.recorder.active()) record(l, false);
         l.through.stop();
         l.s.note = "";
     }
@@ -316,8 +325,28 @@ pub const Live = struct {
 
     fn useKey(l: *Live, choice: shortcut.Choice) void {
         l.choice = choice;
-        hotkey.register(hotkey.space, choice.carbon(), .{ .ctx = l, .func = toggle }) catch |e|
-            std.log.warn("nanolight: {s} can't be registered ({s}); open it from the menu bar", .{ choice.label(), @errorName(e) });
+        hotkey.register(choice.code, choice.mods, .{ .ctx = l, .func = toggle }) catch |e|
+            std.log.warn("nanolight: {f} can't be registered ({s}); open it from the menu bar", .{ choice, @errorName(e) });
+    }
+
+    /// Settings records a key: until it has one, keys pressed go to it,
+    /// and the current key is let go (pressed, it is recorded too).
+    pub fn record(ctx: *anyopaque, on: bool) void {
+        const l: *Live = @ptrCast(@alignCast(ctx));
+        if (on) {
+            hotkey.unregister();
+            l.recorder.start(.{ .ctx = l, .func = recorded });
+            return;
+        }
+        l.recorder.stop();
+        l.s.settings_ui.recording = false;
+        l.useKey(l.choice);
+    }
+
+    fn recorded(ctx: *anyopaque, r: shortcut.Recorded) void {
+        const l: *Live = @ptrCast(@alignCast(ctx));
+        l.s.settings_ui.took(l.s, r);
+        if (l.window) |w| w.redraw();
     }
 
     pub fn apply(ctx: *anyopaque, choice: shortcut.Choice) void {

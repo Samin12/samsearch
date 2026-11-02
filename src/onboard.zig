@@ -42,7 +42,7 @@ pub const Onboard = struct {
     step: Step = .key,
     choice: Choice = .cmd_space,
     hooks: ?Hooks = null,
-    system_buf: [16]shortcut.SystemKey = undefined,
+    system_buf: [96]shortcut.SystemKey = undefined,
     system: []const shortcut.SystemKey = &.{},
     others: shortcut.Others = .{},
     /// Step 2: the shortcut closed the panel, then opened it again.
@@ -109,8 +109,8 @@ pub const Onboard = struct {
     }
 
     fn keyStep(o: *Onboard, c: *ui.Context, p: Palette, enter: bool) void {
-        if (c.input.key == .left) o.choice = Choice.all[(@intFromEnum(o.choice) + Choice.all.len - 1) % Choice.all.len];
-        if (c.input.key == .right) o.choice = Choice.all[(@intFromEnum(o.choice) + 1) % Choice.all.len];
+        if (c.input.key == .left) o.choice = o.choice.step(-1);
+        if (c.input.key == .right) o.choice = o.choice.step(1);
         if (enter) return o.next(c, .try_it);
         {
             const top = ui.div(c).row().wFull().px(28).pt(28).pb(22).gap(16).itemsCenter();
@@ -128,14 +128,18 @@ pub const Onboard = struct {
         {
             const row = ui.div(c).row().gap(8);
             defer row.end();
-            for (Choice.all) |ch| {
-                ui.key(c, @tagName(ch));
-                const on = ch == o.choice;
+            // The four, and a key recorded in Settings when it is the one.
+            var shown: [Choice.all.len + 1]Choice = undefined;
+            @memcpy(shown[0..Choice.all.len], &Choice.all);
+            shown[Choice.all.len] = o.choice;
+            for (shown[0 .. Choice.all.len + @intFromBool(o.choice.preset() == null)]) |ch| {
+                ui.key(c, c.print("key-{d}-{d}", .{ ch.code, ch.mods }));
+                const on = ch.eql(o.choice);
                 const b = ui.div(c).row().h(36).px(16).itemsCenter().rounded(10).control()
                     .bg(if (on) p.sel else p.tile.alpha(0.5)).border(if (on) p.text.alpha(0.35) else p.rim);
                 defer b.end();
                 if (b.clicked()) o.choice = ch;
-                ui.text(c, ch.label(), .{ .size = 14, .weight = if (on) .semibold else .medium, .color = if (on) p.text else p.sub });
+                ui.text(c, c.print("{f}", .{ch}), .{ .size = 14, .weight = if (on) .semibold else .medium, .color = if (on) p.text else p.sub });
             }
         }
         o.status(c, p);
@@ -148,7 +152,7 @@ pub const Onboard = struct {
     /// Who else answers the keys, by name, and the one thing that frees them.
     fn status(o: *Onboard, c: *ui.Context, p: Palette) void {
         const cl = o.clash();
-        const keys = o.choice.label();
+        const keys = c.print("{f}", .{o.choice});
         const ok = c.theme.success;
         const warn: ui.Color = if (c.theme.dark) .hex(0xe0a33a) else .hex(0xb26b00);
         const box = ui.div(c).column().wFull().gap(8).p(12).rounded(10).bg((if (cl.clear()) ok else warn).alpha(0.1));
@@ -198,20 +202,21 @@ pub const Onboard = struct {
             const caps = ui.div(c).row().gap(10).itemsCenter();
             defer caps.end();
             const ch = o.choice;
-            const held_mod = switch (ch) {
-                .cmd_space => c.input.cmd,
-                .opt_space => c.input.alt,
-                .ctrl_space => c.input.ctrl,
-                .opt_cmd_space => c.input.alt and c.input.cmd,
-            };
-            cap(c, p, ch.mods(), 68, held_mod or o.reopened);
-            ui.text(c, "+", .{ .size = 20, .weight = .medium, .color = p.sub.alpha(0.6) });
-            cap(c, p, "Space", 180, o.reopened);
+            const hotkey = @import("hotkey.zig");
+            const held_mod = (ch.mods & hotkey.cmd == 0 or c.input.cmd) and (ch.mods & hotkey.option == 0 or c.input.alt) and
+                (ch.mods & hotkey.control == 0 or c.input.ctrl) and (ch.mods & hotkey.shift == 0 or c.input.shift);
+            const mods = c.print("{f}", .{ch.held()});
+            if (mods.len > 0) {
+                const n: f32 = @floatFromInt(@popCount(ch.mods));
+                cap(c, p, mods, 68 + 22 * @max(0, n - 2), held_mod or o.reopened);
+                ui.text(c, "+", .{ .size = 20, .weight = .medium, .color = p.sub.alpha(0.6) });
+            }
+            cap(c, p, c.print("{f}", .{ch.key()}), if (ch.code == hotkey.space) 180 else 68, o.reopened);
         }
         {
             const t = ui.div(c).column().gap(6).itemsCenter();
             defer t.end();
-            ui.textf(c, .{ .size = 20, .weight = .semibold, .color = p.text, .tracking = -0.2 }, "Press {s} now", .{o.choice.label()});
+            ui.textf(c, .{ .size = 20, .weight = .semibold, .color = p.text, .tracking = -0.2 }, "Press {f} now", .{o.choice});
             ui.text(c, "It closes. Press it again and it comes back, from any app.", .{ .size = 13.5, .color = p.sub });
         }
         const ticks = ui.div(c).row().gap(10);
@@ -243,7 +248,7 @@ pub const Onboard = struct {
             const top = ui.div(c).column().wFull().px(28).pt(26).pb(16).gap(4);
             defer top.end();
             ui.text(c, "You're set.", .{ .size = 22, .weight = .semibold, .color = p.text, .tracking = -0.3 });
-            ui.textf(c, .{ .size = 13.5, .color = p.sub }, "{s} opens it anywhere. Start with one of these:", .{o.choice.label()});
+            ui.textf(c, .{ .size = 13.5, .color = p.sub }, "{f} opens it anywhere. Start with one of these:", .{o.choice});
         }
         {
             const rows = ui.div(c).column().wFull().px(16).gap(2);
@@ -286,7 +291,7 @@ pub const Onboard = struct {
         ui.textf(c, .{ .size = 12, .color = p.sub.alpha(0.8), .tabular = true }, "  {d} of 3", .{n + 1});
         ui.spacer(c);
         const action: []const u8 = switch (o.step) {
-            .key => if (o.clash().clear()) "Continue" else c.print("Use {s} anyway", .{o.choice.label()}),
+            .key => if (o.clash().clear()) "Continue" else c.print("Use {f} anyway", .{o.choice}),
             .try_it => "",
             .done => "Start searching",
         };

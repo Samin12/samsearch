@@ -9,6 +9,9 @@ pub const SettingsHost = struct {
     ctx: *anyopaque,
     choice: *const fn (ctx: *anyopaque) shortcut.Choice,
     apply: *const fn (ctx: *anyopaque, c: shortcut.Choice) void,
+    /// Starts or stops recording a key of one's own: the keys pressed go
+    /// to `Settings.took`, not the panel (recorder.zig).
+    record: *const fn (ctx: *anyopaque, on: bool) void,
     /// Whether it opens at login; `set` changes it first.
     login: *const fn (ctx: *anyopaque, set: ?bool) bool,
     /// Google's suggestions turned on or off in Settings.

@@ -1,7 +1,8 @@
 //! Settings, in the panel itself: the shortcut, Google's suggestions,
 //! opening at login, syncing across Macs, updates. The same glass, the
 //! same rows. Esc goes back to search; ↑/↓ move, Return and Space do the
-//! row. Without a host (tests, the film) it still draws, and changes
+//! row. The shortcut is one of four, or any key recorded with ⌘, ⌥ or ⌃
+//! (the last chip). Without a host (tests, the film) it still draws, and changes
 //! nothing the app keeps.
 const nanoui = @import("nanoui");
 const ui = nanoui.ui;
@@ -24,6 +25,12 @@ pub const Settings = struct {
     /// Return already handled for this key event (a frame may draw twice).
     took_return: bool = false,
     choice: Choice = .cmd_space,
+    /// The last chip's key, recorded (this run or before), if any.
+    custom: ?Choice = null,
+    /// Waiting for a key to be pressed for the last chip; the one pressed
+    /// last wasn't fit (no ⌘, ⌥ or ⌃).
+    recording: bool = false,
+    refused: bool = false,
     suggest: bool = true,
     login: bool = false,
     account: account.State = .signed_out,
@@ -38,6 +45,7 @@ pub const Settings = struct {
 
     pub fn hide(s: *Settings) void {
         s.open = false;
+        s.recording = false;
     }
 
     fn hooks(s: *Settings, n: *panel.Nanolight) ?*const SettingsHost {
@@ -50,6 +58,7 @@ pub const Settings = struct {
         s.suggest = n.suggest_on;
         const h = s.hooks(n) orelse return;
         s.choice = h.choice(h.ctx);
+        if (s.choice.preset() == null) s.custom = s.choice;
         s.login = h.login(h.ctx, null);
         s.account = h.account(h.ctx);
         s.email = h.email(h.ctx);
@@ -105,17 +114,50 @@ pub const Settings = struct {
         const row = ui.div(c).row().gap(8);
         defer row.end();
         for (Choice.all) |ch| {
-            ui.key(c, @tagName(ch));
-            const on = ch == s.choice;
+            ui.key(c, c.print("key-{d}-{d}", .{ ch.code, ch.mods }));
+            const on = ch.eql(s.choice) and !s.recording;
             const b = ui.div(c).row().h(36).px(14).itemsCenter().rounded(10).control()
                 .bg(if (on) p.sel else p.tile.alpha(0.5)).border(if (on) p.text.alpha(0.35) else p.rim);
             defer b.end();
             if (b.clicked()) s.pick(n, ch);
-            ui.text(c, ch.label(), .{ .size = 13.5, .weight = if (on) .semibold else .medium, .color = if (on) p.text else p.sub });
+            ui.text(c, c.print("{f}", .{ch}), .{ .size = 13.5, .weight = if (on) .semibold else .medium, .color = if (on) p.text else p.sub });
+        }
+        // One's own: the key recorded, or a press away.
+        ui.key(c, "key-own");
+        const on = s.recording or (s.custom != null and s.custom.?.eql(s.choice));
+        const b = ui.div(c).row().h(36).px(14).gap(6).itemsCenter().rounded(10).control()
+            .bg(if (on) p.sel else p.tile.alpha(0.5)).border(if (on) p.text.alpha(0.35) else p.rim);
+        defer b.end();
+        if (b.clicked()) s.record(n, !s.recording);
+        const text = if (s.refused) "Add ⌘, ⌥ or ⌃" else if (s.recording) "Type a shortcut" else if (s.custom) |k| c.print("{f}", .{k}) else "Record…";
+        ui.text(c, text, .{ .size = 13.5, .weight = if (on) .semibold else .medium, .color = if (on) p.text else p.sub });
+        if (s.recording) ui.kbd(c, "esc");
+    }
+
+    /// Starts or stops waiting for a key of one's own.
+    fn record(s: *Settings, n: *panel.Nanolight, on: bool) void {
+        s.recording = on;
+        s.refused = false;
+        const h = s.hooks(n) orelse return;
+        h.record(h.ctx, on);
+    }
+
+    /// A key pressed while recording: kept and used, or not.
+    pub fn took(s: *Settings, n: *panel.Nanolight, r: shortcut.Recorded) void {
+        if (!s.recording) return;
+        switch (r) {
+            .unusable => s.refused = true,
+            .cancel => s.record(n, false),
+            .key => |k| {
+                s.record(n, false);
+                s.custom = k;
+                s.pick(n, k);
+            },
         }
     }
 
     fn pick(s: *Settings, n: *panel.Nanolight, ch: Choice) void {
+        if (s.recording) s.record(n, false);
         s.choice = ch;
         const h = s.hooks(n) orelse return;
         h.apply(h.ctx, ch);
@@ -254,15 +296,14 @@ pub const Settings = struct {
 
     fn nudge(s: *Settings, n: *panel.Nanolight, rows: []const RowKind, dir: i8) void {
         if (rows[s.sel] != .choice) return;
-        const i = @intFromEnum(s.choice);
-        const next: usize = if (dir < 0) (i + Choice.all.len - 1) % Choice.all.len else (i + 1) % Choice.all.len;
-        s.pick(n, Choice.all[next]);
+        s.pick(n, s.choice.step(dir));
     }
 
     fn activate(s: *Settings, n: *panel.Nanolight, kind: RowKind) void {
         const h = s.hooks(n);
         switch (kind) {
-            .choice => s.nudge(n, rowList(s.account), 1),
+            // ←/→ step through the four; Return records one's own.
+            .choice => s.record(n, !s.recording),
             .suggest, .login => s.flip(n, kind),
             .sync => if (h) |host| switch (s.account) {
                 .signed_out => host.sign_in(host.ctx),

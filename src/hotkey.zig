@@ -47,6 +47,12 @@ pub fn register(key: u32, modifiers: u32, on: Pressed) !void {
     if (RegisterEventHotKey(key, modifiers, .{ .signature = fourcc("nsPL"), .id = 1 }, GetApplicationEventTarget(), 0, &current) != 0) return error.HotKeyTaken;
 }
 
+/// Gives the key back (while another is recorded); `register` takes one again.
+pub fn unregister() void {
+    if (current) |r| _ = UnregisterEventHotKey(r);
+    current = null;
+}
+
 fn fourcc(comptime s: *const [4]u8) u32 {
     return std.mem.readInt(u32, s, .big);
 }

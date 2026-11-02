@@ -35,7 +35,7 @@ Syncing goes through your Codegraff account, so [Codegraff's terms](https://code
 
 Download `nanolight-macos-arm64.dmg` from the [latest release](https://github.com/justrach/nanolight/releases/latest), open it and drag Nanolight to Applications. macOS 14 or later, Apple silicon.
 
-On first run a short welcome picks the key that opens it (⌘Space, ⌥Space, ⌃Space or ⌥⌘Space) and says who else holds it: Spotlight gives up ⌘Space in System Settings → Keyboard → Keyboard Shortcuts → Spotlight. Signed releases update themselves from this repository's releases; the menu bar icon offers the restart.
+On first run a short welcome picks the key that opens it (⌘Space, ⌥Space, ⌃Space or ⌥⌘Space; any other, such as ⌥X, can be recorded later in Settings) and says who else holds it: Spotlight gives up ⌘Space in System Settings → Keyboard → Keyboard Shortcuts → Spotlight. Signed releases update themselves from this repository's releases; the menu bar icon offers the restart.
 
 ## Build
 
@@ -61,7 +61,7 @@ VERSION=0.1.0 sh macos/package.sh   # the release: signed app, disk image, updat
 | `src/calc.zig` | The calculator |
 | `src/suggest.zig` | Google's completions: the privacy guard, decoding, the cache (after [browse](https://github.com/justrach/browse)) |
 | `src/preview.zig` | The results page in the panel (WKWebView) |
-| `src/onboard.zig`, `src/shortcut.zig` | The welcome, and which key is free |
+| `src/onboard.zig`, `src/shortcut.zig`, `src/recorder.zig` | The welcome, which key is free, recording one's own |
 | `src/film.zig`, `src/stage.zig`, `tools/film.sh` | The walkthrough, rendered offscreen |
 | `src/promo.zig`, `src/promo_cards.zig`, `tools/promo.sh`, `tools/promo/` | The promo: nanoui's shots, Blender's laptop ([docs/promo.md](docs/promo.md)) |
 

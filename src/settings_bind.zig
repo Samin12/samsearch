@@ -8,6 +8,7 @@ pub var box: SettingsHost = .{
     .ctx = undefined,
     .choice = choice,
     .apply = @import("main.zig").applyChoice,
+    .record = @import("main.zig").recordKey,
     .login = @import("main.zig").loginItem,
     .suggest = suggest,
     .account = acct,

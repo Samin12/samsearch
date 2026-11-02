@@ -12,7 +12,7 @@ pub const Launch = struct { name: []const u8, count: u16 };
 
 pub const Settings = struct {
     v: u8 = 1,
-    /// shortcut.Choice's tag ("cmd_space").
+    /// shortcut.Choice's name: "cmd_space", or a recorded "key:7:2048:120".
     hotkey: []const u8,
     suggest: bool,
     /// When `hotkey` or `suggest` last changed, on whichever Mac (unix seconds).

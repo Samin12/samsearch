@@ -18,6 +18,7 @@ test {
     _ = @import("apps.zig");
     _ = @import("hotkey.zig");
     _ = @import("shortcut.zig");
+    _ = @import("recorder.zig");
 }
 
 const Probe = struct {
@@ -325,6 +326,7 @@ const Prefs = struct {
     probe: Probe = .{},
     key: shortcut.Choice = .cmd_space,
     applied: ?shortcut.Choice = null,
+    recording: bool = false,
     login_on: bool = false,
     suggest_sets: u8 = 0,
     box: SettingsHost = undefined,
@@ -334,6 +336,7 @@ const Prefs = struct {
             .ctx = p,
             .choice = choice,
             .apply = apply,
+            .record = record,
             .login = login,
             .suggest = suggestSet,
             .account = acct,
@@ -365,6 +368,9 @@ const Prefs = struct {
         const p: *Prefs = @ptrCast(@alignCast(ctx));
         p.applied = c;
         p.key = c;
+    }
+    fn record(ctx: *anyopaque, on: bool) void {
+        @as(*Prefs, @ptrCast(@alignCast(ctx))).recording = on;
     }
     fn login(ctx: *anyopaque, set: ?bool) bool {
         const p: *Prefs = @ptrCast(@alignCast(ctx));
@@ -436,6 +442,26 @@ test "settings opens from ⌘,, from typing, and from the gear" {
     try std.testing.expect(s.settings_ui.open);
 
     // → picks the next shortcut and tells the host.
+    try std.testing.expect(t.shortcut(.{ .key = ui.Shortcut.right }));
+    try std.testing.expectEqual(shortcut.Choice.opt_space, prefs.applied.?);
+
+    // Return on it records a key of one's own (issue #1): a letter alone
+    // is refused, ⌥X is taken, kept, and shown as the chosen one.
+    press(&t, &.{.{ .command = .insert_newline }});
+    t.settle(1);
+    try std.testing.expect(prefs.recording and t.hasText("Type a shortcut"));
+    s.settings_ui.took(&s, shortcut.recorded(7, 0, 'x'));
+    t.settle(1);
+    try std.testing.expect(prefs.recording and t.hasText("Add ⌘, ⌥ or ⌃"));
+    s.settings_ui.took(&s, shortcut.recorded(7, 1 << 19, 'x'));
+    t.settle(1);
+    try std.testing.expect(!prefs.recording and t.hasText("⌥ X"));
+    try std.testing.expect(prefs.applied.?.eql(.{ .code = 7, .mods = 1 << 11 }));
+    // ← goes back to the four.
+    try std.testing.expect(t.shortcut(.{ .key = ui.Shortcut.left }));
+    try std.testing.expect(prefs.applied.?.eql(.opt_cmd_space));
+    try std.testing.expect(t.hasText("⌥ X"));
+    try std.testing.expect(t.shortcut(.{ .key = ui.Shortcut.right }));
     try std.testing.expect(t.shortcut(.{ .key = ui.Shortcut.right }));
     try std.testing.expectEqual(shortcut.Choice.opt_space, prefs.applied.?);
 
