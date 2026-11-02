@@ -9,6 +9,7 @@
 //! for a letter or two swapped, wrong, missing or extra ("chorme" for
 //! Chrome, "calandar" for Calendar).
 const std = @import("std");
+const text = @import("text.zig");
 
 /// Up to this many matched bytes are kept for highlighting.
 pub const max_hits = 32;
@@ -69,7 +70,11 @@ fn indexOfFold(hay: []const u8, needle: []const u8, from: usize) ?usize {
 pub fn score(query_in: []const u8, name: []const u8) ?Match {
     const query = std.mem.trim(u8, query_in, " ");
     if (query.len == 0 or name.len == 0) return null;
-    // Shorter names win ties: "Notes" over "Notes Helper".
+    if (text.hasNonAscii(query) or text.hasNonAscii(name)) return scoreUnicode(query, name);
+    return scoreAscii(query, name);
+}
+
+fn scoreAscii(query: []const u8, name: []const u8) ?Match {
     const slack: i32 = @intCast(@min(name.len -| query.len, 60));
     if (query.len == name.len and startsWithFold(name, query)) return .run(1000, 0, name.len);
     if (startsWithFold(name, query)) return .run(900 - slack, 0, query.len);
@@ -81,6 +86,107 @@ pub fn score(query_in: []const u8, name: []const u8) ?Match {
     if (initials(query, name)) |m| return m;
     if (indexOfFold(name, query, 0)) |i| return .run(600 - slack - @as(i32, @intCast(@min(i, 60))), i, query.len);
     return subsequence(query, name) orelse typo(query, name);
+}
+
+fn cpWordStart(name: []const u8, byte_i: usize) bool {
+    if (byte_i == 0) return true;
+    const ch = text.decodeAt(name, byte_i) orelse return false;
+    const ch_cp = ch.cp;
+    var pi = byte_i;
+    while (pi > 0) {
+        pi -= 1;
+        if ((name[pi] & 0xC0) != 0x80) break;
+    }
+    const prev = text.decodeAt(name, pi) orelse return true;
+    const prev_cp = prev.cp;
+    if (prev_cp == ' ' or prev_cp == '-' or prev_cp == '_' or prev_cp == '.' or prev_cp == '/' or prev_cp == '(') return ch_cp != ' ';
+    if (ch_cp < 0x80 and prev_cp < 0x80) return std.ascii.isUpper(@intCast(ch_cp)) and std.ascii.isLower(@intCast(prev_cp));
+    if (ch_cp >= 0x3400 and ch_cp <= 0x9FFF) return true;
+    return false;
+}
+
+fn scoreUnicode(query: []const u8, name: []const u8) ?Match {
+    const slack: i32 = @intCast(@min(name.len -| query.len, 60));
+    if (text.utf8StartsWithFold(name, query)) {
+        var m: Match = .{ .score = 900 - slack };
+        var ni: usize = 0;
+        var hi: usize = 0;
+        while (ni < query.len and hi < name.len) {
+            const nl = std.unicode.utf8ByteSequenceLength(query[ni]) catch break;
+            const hl = std.unicode.utf8ByteSequenceLength(name[hi]) catch break;
+            for (0..hl) |d| m.add(hi + d);
+            ni += nl;
+            hi += hl;
+        }
+        return m;
+    }
+    if (indexOfUnicode(name, query)) |i| {
+        var m: Match = .{ .score = 600 - slack - @as(i32, @intCast(@min(i, 60))) };
+        var ni: usize = 0;
+        var at = i;
+        while (ni < query.len and at < name.len) {
+            const nl = std.unicode.utf8ByteSequenceLength(query[ni]) catch break;
+            const hl = std.unicode.utf8ByteSequenceLength(name[at]) catch break;
+            for (0..hl) |d| m.add(at + d);
+            ni += nl;
+            at += hl;
+        }
+        return m;
+    }
+    return subsequenceUnicode(query, name);
+}
+
+fn indexOfUnicode(hay: []const u8, needle: []const u8) ?usize {
+    var i: usize = 0;
+    while (i < hay.len) {
+        if (text.utf8StartsWithFold(hay[i..], needle)) return i;
+        const l = std.unicode.utf8ByteSequenceLength(hay[i]) catch {
+            i += 1;
+            continue;
+        };
+        i += l;
+    }
+    return null;
+}
+
+fn subsequenceUnicode(query: []const u8, name: []const u8) ?Match {
+    var m: Match = .{ .score = 300 };
+    var last: ?usize = null;
+    var qi: usize = 0;
+    var hi: usize = 0;
+    while (qi < query.len) {
+        if (query[qi] == ' ') {
+            qi += 1;
+            continue;
+        }
+        const qd = text.decodeAt(query, qi) orelse return null;
+        const qc = qd.cp;
+        var found: ?usize = null;
+        while (hi < name.len) {
+            const hd = text.decodeAt(name, hi) orelse {
+                hi += 1;
+                continue;
+            };
+            if (text.fold(hd.cp) == text.fold(qc)) {
+                found = hi;
+                hi += hd.len;
+                break;
+            }
+            hi += hd.len;
+        }
+        const at = found orelse return null;
+        if (cpWordStart(name, at)) m.score += 12;
+        if (last) |l| {
+            const step_len = if (text.decodeAt(name, l)) |d| d.len else 1;
+            if (at == l + step_len) m.score += 8 else m.score -= @intCast(@min(at - l, 20));
+        } else m.score -= @intCast(@min(at, 20));
+        const at_len = if (text.decodeAt(name, at)) |d| d.len else 1;
+        for (0..at_len) |d| m.add(at + d);
+        last = at;
+        qi += qd.len;
+    }
+    m.score -= @intCast(@min(name.len, 60) / 4);
+    return m;
 }
 
 /// The typos a query of this length may have: none under 4 letters (too
@@ -223,14 +329,32 @@ pub const Ranked = struct {
     }
 };
 
+const Index = @import("apps.zig").Index;
+
 /// The best `out.len` of `names` for `query`, best first, with `boost`
-/// (how often each was opened) added to its score. Returns how many matched.
+/// (how often each was opened) added to its score.
 pub fn rank(query: []const u8, names: []const []const u8, boost: []const u16, out: []Ranked) usize {
+    return rankNames(query, names, &.{}, boost, out);
+}
+
+/// Like `rank`, with optional `pinyin` per name (same length as `names`).
+pub fn rankNames(query: []const u8, names: []const []const u8, pinyin: []const []const u8, boost: []const u16, out: []Ranked) usize {
     var n: usize = 0;
     for (names, 0..) |name, i| {
-        var m = score(query, name) orelse continue;
-        if (i < boost.len) m.score += @min(@as(i32, boost[i]) * 25, 250);
-        const r: Ranked = .{ .index = @intCast(i), .match = m };
+        var m = score(query, name);
+        const py = if (i < pinyin.len) pinyin[i] else "";
+        if (py.len > 0) {
+            if (scoreAscii(query, py)) |mp| {
+                var via = mp;
+                via.score -= 70;
+                via.n = 0;
+                if (m == null or via.score > m.?.score) m = via;
+            }
+        }
+        const hit = m orelse continue;
+        var scored = hit;
+        if (i < boost.len) scored.score += @min(@as(i32, boost[i]) * 25, 250);
+        const r: Ranked = .{ .index = @intCast(i), .match = scored };
         if (n < out.len) {
             out[n] = r;
             n += 1;
@@ -241,7 +365,40 @@ pub fn rank(query: []const u8, names: []const []const u8, boost: []const u16, ou
         for (out[1..n], 1..) |o, j| if (o.match.score < out[worst].match.score) {
             worst = j;
         };
-        if (m.score > out[worst].match.score) out[worst] = r;
+        if (scored.score > out[worst].match.score) out[worst] = r;
+    }
+    std.sort.pdq(Ranked, out[0..n], {}, Ranked.before);
+    return n;
+}
+
+/// Ranks apps using each entry's display name and optional pinyin key.
+pub fn rankApps(query: []const u8, ix: *const Index, boost: []const u16, out: []Ranked) usize {
+    var n: usize = 0;
+    for (ix.names.items, 0..) |name, i| {
+        var m = score(query, name);
+        const py = ix.apps.items[i].pinyin;
+        if (py.len > 0) {
+            if (scoreAscii(query, py)) |mp| {
+                var via = mp;
+                via.score -= 70;
+                via.n = 0;
+                if (m == null or via.score > m.?.score) m = via;
+            }
+        }
+        const hit = m orelse continue;
+        var scored = hit;
+        if (i < boost.len) scored.score += @min(@as(i32, boost[i]) * 25, 250);
+        const r: Ranked = .{ .index = @intCast(i), .match = scored };
+        if (n < out.len) {
+            out[n] = r;
+            n += 1;
+            continue;
+        }
+        var worst: usize = 0;
+        for (out[1..n], 1..) |o, j| {
+            if (o.match.score < out[worst].match.score) worst = j;
+        }
+        if (scored.score > out[worst].match.score) out[worst] = r;
     }
     std.sort.pdq(Ranked, out[0..n], {}, Ranked.before);
     return n;
@@ -287,6 +444,28 @@ test "typos still find the app, below every exact match" {
 test "a subsequence highlights the letters it took" {
     const m = score("sfr", "Safari").?;
     try std.testing.expectEqualSlices(u8, &.{ 0, 2, 4 }, m.matched());
+}
+
+test "unicode display names match by prefix and subsequence" {
+    const t = std.testing;
+    try t.expect(score("微信", "微信") != null);
+    try t.expect(score("微", "微信") != null);
+    try t.expect(score("信", "微信") != null);
+    try t.expect(score("wx", "微信") == null);
+}
+
+test "pinyin keys find CJK display names" {
+    const t = std.testing;
+    var ix = Index.init(t.allocator);
+    defer ix.deinit();
+    try ix.add("WeChat", "/Applications/WeChat.app");
+    const a = ix.arena.allocator();
+    ix.apps.items[0].name = try a.dupe(u8, "微信");
+    ix.names.items[0] = ix.apps.items[0].name;
+    ix.apps.items[0].pinyin = try a.dupe(u8, "weixin");
+    var out: [1]Ranked = undefined;
+    try t.expectEqual(@as(usize, 1), rankApps("weixin", &ix, &.{}, &out));
+    try t.expectEqual(@as(u32, 0), out[0].index);
 }
 
 test "rank keeps the best, best first, and opening often lifts a name" {

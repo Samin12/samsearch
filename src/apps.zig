@@ -15,6 +15,8 @@ pub const App = struct {
     path: []const u8,
     /// The folder it is in, as the row shows it: "Applications", "Utilities".
     folder: []const u8,
+    /// Mandarin reading as ASCII (scan time), for Latin queries.
+    pinyin: []const u8 = "",
 };
 
 /// Where apps are, in the order a name is first taken from.
@@ -102,6 +104,21 @@ pub const Index = struct {
         if (home) |h| {
             var buf: [512]u8 = undefined;
             if (std.fmt.bufPrint(&buf, "{s}/Applications", .{h})) |p| ix.scanDir(io, p, 1) else |_| {}
+        }
+        ix.sort();
+        ix.localize();
+    }
+
+    /// Localized display names and pinyin keys for search (macOS only).
+    pub fn localize(ix: *Index) void {
+        if (!mac) return;
+        const text = @import("text.zig");
+        const a = ix.arena.allocator();
+        for (ix.apps.items) |*app| {
+            if (displayNameInto(a, app.path)) |loc| {
+                if (!std.ascii.eqlIgnoreCase(loc, app.name)) app.name = loc;
+            }
+            if (text.hasCjk(app.name)) app.pinyin = pinyinKey(a, app.name) orelse "";
         }
         ix.sort();
     }
@@ -236,6 +253,34 @@ fn openApp(path: []const u8) void {
 }
 
 /// The Finder's icon for `path`, drawn at 64 pixels and encoded as PNG.
+fn displayNameInto(a: std.mem.Allocator, path: []const u8) ?[]const u8 {
+    const pool = objc.Pool.push();
+    defer pool.pop();
+    const fm = objc.msg(objc.Object, objc.class("NSFileManager"), "defaultManager", .{});
+    const ns = objc.msg(objc.Object, fm, "displayNameAtPath:", .{objc.nsString(path)});
+    const utf8 = objc.msg(?[*]const u8, ns, "UTF8String", .{}) orelse return null;
+    return a.dupe(u8, std.mem.sliceTo(utf8, 0)) catch null;
+}
+
+fn pinyinKey(a: std.mem.Allocator, name: []const u8) ?[]const u8 {
+    const pool = objc.Pool.push();
+    defer pool.pop();
+    const ns = objc.nsString(name);
+    const step1 = objc.msg(objc.Object, ns, "stringByApplyingTransform:reverse:", .{ objc.nsString("Mandarin-Latin"), objc.NO });
+    const step2 = objc.msg(objc.Object, step1, "stringByApplyingTransform:reverse:", .{ objc.nsString("Latin-ASCII"), objc.NO });
+    const latin = objc.msg(?[*]const u8, step2, "UTF8String", .{}) orelse return null;
+    var buf: [128]u8 = undefined;
+    var n: usize = 0;
+    for (std.mem.sliceTo(latin, 0)) |ch| {
+        if (ch == ' ' or ch == '\'') continue;
+        if (n == buf.len) break;
+        buf[n] = std.ascii.toLower(ch);
+        n += 1;
+    }
+    if (n == 0) return null;
+    return a.dupe(u8, buf[0..n]) catch null;
+}
+
 fn iconPng(gpa: std.mem.Allocator, path: []const u8) ?[]u8 {
     const pool = objc.Pool.push();
     defer pool.pop();

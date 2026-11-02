@@ -9,6 +9,7 @@ const std = @import("std");
 const search = @import("search.zig");
 const calc = @import("calc.zig");
 const mac = @import("builtin").os.tag == .macos;
+const Index = @import("apps.zig").Index;
 
 /// The key held for the panel's shortcuts (⌘1, ⌘↩, ⌘,): Ctrl on a PC.
 pub const mod = if (mac) "⌘" else "Ctrl+";
@@ -96,7 +97,8 @@ pub const Results = struct {
     /// Lists what `query` finds among `names` (with how often each was
     /// opened, `boost`) and Google's completions of it (`web`), or
     /// `suggestions` when the query is empty.
-    pub fn build(r: *Results, query_in: []const u8, names: []const []const u8, boost: []const u16, suggestions: []const u32, web: []const []const u8) void {
+    pub fn build(r: *Results, query_in: []const u8, ix: *const Index, suggestions: []const u32, web: []const []const u8) void {
+        const boost = ix.launches.items;
         r.n = 0;
         const query = std.mem.trim(u8, query_in, " ");
         r.suggested = query.len == 0;
@@ -113,7 +115,7 @@ pub const Results = struct {
             r.push(.{ .kind = .calc });
         }
         var ranked: [max_apps]search.Ranked = undefined;
-        const n = search.rank(query, names, boost, &ranked);
+        const n = search.rankApps(query, ix, boost, &ranked);
         for (ranked[0..n]) |x| r.push(.{ .kind = .app, .app = x.index, .match = x.match });
         // "settings" / "preferences": Nanolight's own screen, right under
         // the apps: Return still opens System Settings, a key away from this.
@@ -130,7 +132,11 @@ pub const Results = struct {
 
     /// "settings" and "preferences", the words people type for this.
     fn isSettings(query: []const u8) bool {
-        return std.ascii.eqlIgnoreCase(query, "settings") or std.ascii.eqlIgnoreCase(query, "preferences");
+        if (std.ascii.eqlIgnoreCase(query, "settings") or std.ascii.eqlIgnoreCase(query, "preferences")) return true;
+        const keys = [_][]const u8{ "设置", "偏好设置", "系统设置", "nanolight 设置" };
+        const q = std.mem.trim(u8, query, " ");
+        for (keys) |k| if (std.mem.eql(u8, q, k)) return true;
+        return false;
     }
 
     fn push(r: *Results, row: Row) void {
@@ -174,11 +180,21 @@ pub fn escape(w: *std.Io.Writer, query: []const u8) void {
     }
 }
 
+fn testIndex(a: std.mem.Allocator, names: []const []const u8) !Index {
+    var ix: Index = .init(a);
+    for (names) |n| {
+        var buf: [128]u8 = undefined;
+        try ix.add(n, try std.fmt.bufPrint(&buf, "/Applications/{s}.app", .{n}));
+    }
+    return ix;
+}
+
 test "math first, then apps; ask and search only without an answer" {
     const t = std.testing;
-    const names = [_][]const u8{ "Safari", "System Settings", "Calculator" };
+    var ix = try testIndex(t.allocator, &.{ "Safari", "System Settings", "Calculator" });
+    defer ix.deinit();
     var r: Results = .{};
-    r.build("saf", &names, &.{}, &.{}, &.{});
+    r.build("saf", &ix, &.{}, &.{});
     try t.expectEqual(Kind.app, r.rows[0].kind);
     try t.expectEqual(@as(u32, 0), r.rows[0].app);
     try t.expectEqual(Kind.search_web, r.rows[r.n - 3].kind);
@@ -186,22 +202,22 @@ test "math first, then apps; ask and search only without an answer" {
     try t.expectEqualStrings("Google", r.section(1).?);
     try t.expectEqualStrings("Ask & Search", r.section(2).?);
     try t.expect(r.section(3) == null);
-    r.build("2^10 * 3", &names, &.{}, &.{}, &.{"ignored"});
+    r.build("2^10 * 3", &ix, &.{}, &.{"ignored"});
     try t.expectEqual(Kind.calc, r.rows[0].kind);
     try t.expectEqualStrings("3,072", r.answer);
     try t.expectEqualStrings("0xC00", r.hex);
     try t.expectEqual(@as(usize, 1), r.n);
-    r.build("", &names, &.{}, &.{ 2, 0 }, &.{});
+    r.build("", &ix, &.{ 2, 0 }, &.{});
     try t.expectEqual(@as(usize, 2), r.n);
     try t.expectEqualStrings("Suggestions", r.section(0).?);
-    r.build("liquid glass", &names, &.{}, &.{}, &.{});
+    r.build("liquid glass", &ix, &.{}, &.{});
     try t.expectEqual(@as(usize, 3), r.n);
     // No app: the search for what was typed comes first.
     try t.expectEqual(Kind.search_web, r.rows[0].kind);
     try t.expectEqualStrings("Google", r.section(0).?);
     try t.expectEqualStrings("Ask & Search", r.section(1).?);
     // Completions under it, in the same section, then Grok and X.
-    r.build("liquid gl", &names, &.{}, &.{}, &.{ "liquid glass", "liquid glue" });
+    r.build("liquid gl", &ix, &.{}, &.{ "liquid glass", "liquid glue" });
     try t.expectEqual(@as(usize, 5), r.n);
     try t.expectEqual(Kind.search_web, r.rows[0].kind);
     try t.expectEqual(Kind.suggest, r.rows[1].kind);
@@ -210,13 +226,14 @@ test "math first, then apps; ask and search only without an answer" {
     try t.expect(r.section(1) == null and r.section(2) == null);
     try t.expectEqualStrings("Ask & Search", r.section(3).?);
     // "settings": System Settings first, Nanolight's own a row under it.
-    r.build("settings", &names, &.{}, &.{}, &.{});
+    r.build("settings", &ix, &.{}, &.{});
     try t.expectEqual(Kind.app, r.rows[0].kind);
     try t.expectEqual(@as(u32, 1), r.rows[0].app);
     try t.expectEqual(Kind.settings, r.rows[1].kind);
     // A full list of apps still ends with every handoff.
-    const many = [_][]const u8{ "Safari", "Mail", "Maps", "Pages", "Calendar", "Calculator", "FaceTime" };
-    r.build("a", &many, &.{}, &.{}, &.{ "a1", "a2", "a3", "a4" });
+    var many_ix = try testIndex(t.allocator, &.{ "Safari", "Mail", "Maps", "Pages", "Calendar", "Calculator", "FaceTime" });
+    defer many_ix.deinit();
+    r.build("a", &many_ix, &.{}, &.{ "a1", "a2", "a3", "a4" });
     try t.expectEqual(max_rows, r.n);
     try t.expectEqual(Kind.search_web, r.rows[max_apps].kind);
     try t.expectEqual(Kind.suggest, r.rows[max_apps + 1].kind);
