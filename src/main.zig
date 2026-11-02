@@ -353,6 +353,9 @@ pub const Live = struct {
         l.s.reveal();
         w.show();
         panel.shown(w);
+        // Key + front isn't enough for a menu bar app: without activating,
+        // macOS won't attach the input method (no pinyin candidates).
+        w.focus();
         l.through.start();
         if (l.acct) |*a| a.maybePull();
         w.redraw();
