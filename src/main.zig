@@ -132,7 +132,7 @@ pub const Live = struct {
         const l: *Live = @ptrCast(@alignCast(ctx));
         const ix = l.s.index;
         var list: std.ArrayList(@import("settings.zig").Launch) = .empty;
-        for (ix.apps.items, ix.launches.items) |a, n| if (n > 0) list.append(arena, .{ .name = a.name, .count = n }) catch break;
+        for (ix.apps.items, ix.launches.items) |a, n| if (n > 0) list.append(arena, .{ .name = a.name, .path = a.path, .count = n }) catch break;
         var at: i64 = 0;
         if (l.kv.get(arena, sync_at_key) catch null) |v| at = std.fmt.parseInt(i64, v, 10) catch 0;
         const name = arena.create([32]u8) catch return .{ .hotkey = "cmd_space", .suggest = l.s.suggest_on, .at = at, .launches = list.items };
@@ -153,9 +153,13 @@ pub const Live = struct {
             l.kv.set(suggest_key, if (st.suggest) "1" else "0") catch {};
         }
         const ix = l.s.index;
-        for (st.launches) |la| if (ix.find(la.name)) |i| {
-            ix.launches.items[i] = @max(ix.launches.items[i], la.count);
-        };
+        for (st.launches) |la| {
+            const i = if (la.path.len > 0)
+                ix.findPath(la.path) orelse ix.find(la.name)
+            else
+                ix.find(la.name);
+            if (i) |idx| ix.launches.items[idx] = @max(ix.launches.items[idx], la.count);
+        }
         ix.save(l.kv);
         l.s.built = 1;
         l.menu();

@@ -32,8 +32,6 @@ pub fn build(b: *std.Build) void {
     // Raycast extensions' host (raycast/dist/host.js, 170 KB), in the
     // program: written out for the user's Node when an extension runs.
     exe.root_module.addAnonymousImport("raycast_host", .{ .root_source_file = b.path("raycast/dist/host.js") });
-    // A release is shipped without its debug info (15 MB to 2.8 MB on Linux).
-    if (optimize != .debug) exe.root_module.strip = true;
     switch (os) {
         .macos => {
             // Its hot key (⌘Space from any app, or the key its welcome picks) is Carbon's.

@@ -9,6 +9,7 @@ const motion = ui.motion;
 const Index = @import("apps.zig").Index;
 const results = @import("results.zig");
 const suggest = @import("suggest.zig");
+const text = @import("text.zig");
 const settings_view = @import("settings_view.zig");
 const SettingsHost = @import("settings_host.zig").SettingsHost;
 const Row = results.Row;
@@ -270,13 +271,13 @@ pub const Nanolight = struct {
         const r = s.res.rows[0];
         if (r.kind == .app) {
             const name = s.index.apps.items[r.app].name;
-            if (name.len <= q.len or !std.ascii.startsWithIgnoreCase(name, q)) return "";
+            if (name.len <= q.len or !text.utf8StartsWithFold(name, q)) return "";
             return name[q.len..];
         }
         if (r.kind != .search_web) return "";
         for (0..s.web.n) |i| {
             const w = s.web.get(i);
-            if (w.len > q.len and std.ascii.startsWithIgnoreCase(w, q)) return w[q.len..];
+            if (w.len > q.len and text.utf8StartsWithFold(w, q)) return w[q.len..];
         }
         return "";
     }
@@ -314,7 +315,7 @@ pub const Nanolight = struct {
         var sug: [results.max_apps]u32 = undefined;
         const ns = s.index.suggestions(&sug);
         var web: [suggest.max_rows][]const u8 = undefined;
-        s.res.build(s.query.text(), s.index.names.items, s.index.launches.items, sug[0..ns], s.web.slices(&web));
+        s.res.build(s.query.text(), s.index, sug[0..ns], s.web.slices(&web));
     }
 
     /// Google's completions of `typed` (what `Host.suggest` asked): kept,
@@ -483,7 +484,7 @@ pub const Nanolight = struct {
     /// it adds stronger.
     fn added(s: *Nanolight, i: usize, w: []const u8, p: Palette) []const ui.Span {
         const q = std.mem.trim(u8, s.query.text(), " ");
-        if (q.len == 0 or w.len <= q.len or !std.ascii.startsWithIgnoreCase(w, q)) return &.{};
+        if (q.len == 0 or w.len <= q.len or !text.utf8StartsWithFold(w, q)) return &.{};
         s.spans[i][0] = .{ .start = @intCast(q.len), .end = @intCast(w.len), .color = p.text, .weight = .semibold };
         return s.spans[i][0..1];
     }

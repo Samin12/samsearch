@@ -15,6 +15,8 @@ pub const App = struct {
     path: []const u8,
     /// The folder it is in, as the row shows it: "Applications", "Utilities".
     folder: []const u8,
+    /// Mandarin reading as ASCII (scan time), for Latin queries.
+    pinyin: []const u8 = "",
 };
 
 /// Where apps are, in the order a name is first taken from.
@@ -111,6 +113,22 @@ pub const Index = struct {
             if (std.fmt.bufPrint(&buf, "{s}/Applications", .{h})) |p| ix.scanDir(io, p, 1) else |_| {}
         }
         ix.sort();
+        ix.localize();
+    }
+
+    /// Localized display names and pinyin keys for search (macOS only).
+    pub fn localize(ix: *Index) void {
+        if (!mac) return;
+        const text = @import("text.zig");
+        const a = ix.arena.allocator();
+        for (ix.apps.items) |*app| {
+            if (!wantsLocalizedDisplayName(app.path)) continue;
+            if (displayNameInto(a, app.path)) |loc| {
+                if (!std.ascii.eqlIgnoreCase(loc, app.name)) app.name = loc;
+            }
+            if (text.hasCjk(app.name)) app.pinyin = pinyinKey(a, app.name) orelse "";
+        }
+        ix.sort();
     }
 
     fn scanDir(ix: *Index, io: std.Io, dir_path: []const u8, depth: u8) void {
@@ -158,6 +176,11 @@ pub const Index = struct {
         return null;
     }
 
+    pub fn findPath(ix: *const Index, path: []const u8) ?u32 {
+        for (ix.apps.items, 0..) |a, i| if (std.mem.eql(u8, a.path, path)) return @intCast(i);
+        return null;
+    }
+
     /// Up to `out.len` apps for an empty query: the most opened, else a
     /// few every Mac has.
     pub fn suggestions(ix: *const Index, out: []u32) usize {
@@ -197,19 +220,23 @@ pub const Index = struct {
     pub fn save(ix: *Index, kv: nanoui.kv.Store) void {
         var aw: std.Io.Writer.Allocating = .init(ix.gpa);
         defer aw.deinit();
-        for (ix.apps.items, ix.launches.items) |a, l| if (l > 0) aw.writer.print("{s}\t{d}\n", .{ a.name, l }) catch return;
+        for (ix.apps.items, ix.launches.items) |a, l| if (l > 0) aw.writer.print("{s}\t{d}\n", .{ a.path, l }) catch return;
         kv.set(store_key, aw.written()) catch {};
     }
 
-    /// The counts `opened` kept.
+    /// The counts `opened` kept. Keys are app paths; older rows used
+    /// display names and are still read once.
     pub fn load(ix: *Index, store: nanoui.kv.Store) void {
         const v = (store.get(ix.gpa, store_key) catch null) orelse return;
         defer ix.gpa.free(v);
         var lines = std.mem.splitScalar(u8, v, '\n');
         while (lines.next()) |line| {
+            if (line.len == 0) continue;
             const tab = std.mem.indexOfScalar(u8, line, '\t') orelse continue;
-            const i = ix.find(line[0..tab]) orelse continue;
-            ix.launches.items[i] = std.fmt.parseInt(u16, line[tab + 1 ..], 10) catch 0;
+            const key = line[0..tab];
+            const count = std.fmt.parseInt(u16, line[tab + 1 ..], 10) catch 0;
+            const i = resolveLaunchKey(ix, key) orelse continue;
+            ix.launches.items[i] = count;
         }
     }
 
@@ -229,6 +256,11 @@ pub const Index = struct {
 
 const store_key = "nanolight.launches";
 
+fn resolveLaunchKey(ix: *const Index, key: []const u8) ?u32 {
+    if (ix.findPath(key)) |i| return i;
+    return ix.find(key);
+}
+
 /// Opens the Mac app at `path` without waiting for it: LaunchServices
 /// answers when the app has started, which can take seconds (an app
 /// reinstalled while Nanolight ran, issue #7), and `openURL:` waited on
@@ -242,7 +274,41 @@ fn openApp(path: []const u8) void {
     objc.msg(void, ws, "openApplicationAtURL:configuration:completionHandler:", .{ url, config, @as(?*anyopaque, null) });
 }
 
+fn wantsLocalizedDisplayName(path: []const u8) bool {
+    if (std.mem.indexOf(u8, path, "zig-cache") != null) return false;
+    for (roots) |r| if (std.mem.startsWith(u8, path, r)) return true;
+    return std.mem.indexOf(u8, path, "/Applications/") != null;
+}
+
 /// The Finder's icon for `path`, drawn at 64 pixels and encoded as PNG.
+fn displayNameInto(a: std.mem.Allocator, path: []const u8) ?[]const u8 {
+    const pool = objc.Pool.push();
+    defer pool.pop();
+    const fm = objc.msg(objc.Object, objc.class("NSFileManager"), "defaultManager", .{});
+    const ns = objc.msg(objc.Object, fm, "displayNameAtPath:", .{objc.nsString(path)});
+    const utf8 = objc.msg(?[*]const u8, ns, "UTF8String", .{}) orelse return null;
+    return a.dupe(u8, std.mem.sliceTo(utf8, 0)) catch null;
+}
+
+fn pinyinKey(a: std.mem.Allocator, name: []const u8) ?[]const u8 {
+    const pool = objc.Pool.push();
+    defer pool.pop();
+    const ns = objc.nsString(name);
+    const step1 = objc.msg(objc.Object, ns, "stringByApplyingTransform:reverse:", .{ objc.nsString("Mandarin-Latin"), objc.NO });
+    const step2 = objc.msg(objc.Object, step1, "stringByApplyingTransform:reverse:", .{ objc.nsString("Latin-ASCII"), objc.NO });
+    const latin = objc.msg(?[*]const u8, step2, "UTF8String", .{}) orelse return null;
+    var buf: [128]u8 = undefined;
+    var n: usize = 0;
+    for (std.mem.sliceTo(latin, 0)) |ch| {
+        if (ch == ' ' or ch == '\'') continue;
+        if (n == buf.len) break;
+        buf[n] = std.ascii.toLower(ch);
+        n += 1;
+    }
+    if (n == 0) return null;
+    return a.dupe(u8, buf[0..n]) catch null;
+}
+
 fn iconPng(gpa: std.mem.Allocator, path: []const u8) ?[]u8 {
     const pool = objc.Pool.push();
     defer pool.pop();
@@ -310,4 +376,37 @@ test "a second look tells an app installed since from no change (#15)" {
     later.scan(t.io, home);
     try t.expect(!ix.same(&later));
     try t.expect(later.find("DOSBox-X") != null);
+}
+
+test "launch counts resolve stored paths on Windows-style keys" {
+    const t = std.testing;
+    var ix: Index = .init(t.allocator);
+    defer ix.deinit();
+    try ix.add("Explorer", "C:\\Windows\\explorer.exe");
+    const i = ix.findPath("C:\\Windows\\explorer.exe").?;
+    ix.opened(i, null);
+    var mem: nanoui.kv.Memory = .{ .gpa = t.allocator };
+    defer mem.deinit();
+    ix.save(mem.store());
+    ix.launches.items[i] = 0;
+    ix.load(mem.store());
+    try t.expectEqual(@as(u16, 1), ix.launches.items[i]);
+}
+
+test "launch counts follow the app path when the display name changes" {
+    const t = std.testing;
+    var ix: Index = .init(t.allocator);
+    defer ix.deinit();
+    try ix.add("WeChat", "/Applications/WeChat.app");
+    const i = ix.findPath("/Applications/WeChat.app").?;
+    ix.opened(i, null);
+    ix.opened(i, null);
+    var mem: nanoui.kv.Memory = .{ .gpa = t.allocator };
+    defer mem.deinit();
+    ix.save(mem.store());
+    ix.apps.items[i].name = "微信";
+    ix.names.items[i] = "微信";
+    ix.launches.items[i] = 0;
+    ix.load(mem.store());
+    try t.expectEqual(@as(u16, 2), ix.launches.items[i]);
 }

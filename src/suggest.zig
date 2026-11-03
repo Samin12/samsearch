@@ -58,7 +58,7 @@ pub fn plain(buf: *[max_len]u8, s: []const u8) []const u8 {
             space = false;
             if (n == buf.len) break;
         }
-        buf[n] = std.ascii.toLower(ch);
+        if (ch < 0x80) buf[n] = std.ascii.toLower(ch) else buf[n] = ch;
         n += 1;
     }
     return buf[0..n];
