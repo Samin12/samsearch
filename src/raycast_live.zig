@@ -79,7 +79,7 @@ fn live(ctx: *anyopaque) *Live {
 
 fn open(ctx: *anyopaque, target: []const u8) void {
     const l = live(ctx);
-    if (std.mem.startsWith(u8, target, "https://") or std.mem.startsWith(u8, target, "http://")) {
+    if (apps.isUrl(target)) {
         _ = nanoui.shell.openUrl(target);
     } else _ = apps.launch(l.app.io, target);
 }

@@ -8,6 +8,7 @@
 const std = @import("std");
 const search = @import("search.zig");
 const calc = @import("calc.zig");
+const panes = @import("settings_panes.zig");
 const mac = @import("builtin").os.tag == .macos;
 
 /// The key held for the panel's shortcuts (⌘1, ⌘↩, ⌘,): Ctrl on a PC.
@@ -25,6 +26,8 @@ pub const Kind = enum {
     suggest,
     /// Nanolight's own Settings, listed when the query asks for them.
     settings,
+    /// A pane of System Settings (`Row.app` its place in settings_panes.zig).
+    pane,
 
     /// The row's kind as its trailing label shows it.
     pub fn label(k: Kind) []const u8 {
@@ -32,6 +35,7 @@ pub const Kind = enum {
             .calc => "Calculator",
             .app => "Application",
             .settings => "Nanolight",
+            .pane => "System Settings",
             .ask_grok, .search_x, .search_web, .suggest => "Web",
         };
     }
@@ -42,6 +46,7 @@ pub const Kind = enum {
             .calc => "Copy Answer",
             .app => "Open Application",
             .settings => "Open Settings",
+            .pane => "Open in System Settings",
             .ask_grok => "Ask Grok",
             .search_x => "Search X",
             .search_web, .suggest => "Search Google",
@@ -53,6 +58,7 @@ pub const Kind = enum {
             .calc => "Calculator",
             .app => if (suggested) "Suggestions" else "Applications",
             .settings => "Nanolight",
+            .pane => "System Settings",
             .search_web, .suggest => "Google",
             .ask_grok, .search_x => "Ask & Search",
         };
@@ -70,6 +76,8 @@ pub const Row = struct {
 };
 
 pub const max_apps = 6;
+/// System Settings' panes, under the apps (the Mac's).
+pub const max_panes = 3;
 /// Google's completions fill what room is left, up to four.
 pub const max_web = 4;
 /// Every app and the three web rows leave room for three completions.
@@ -119,9 +127,15 @@ pub const Results = struct {
         // the apps: Return still opens System Settings, a key away from this.
         if (isSettings(query)) r.push(.{ .kind = .settings });
         if (r.n > 0 and r.rows[0].kind == .calc) return;
+        // System Settings' panes, in their own section. A section's header
+        // is less than a row: one completion fewer pays for it, so the
+        // panel never grows past its tallest (view.max_height).
+        var pane_rows: [max_panes]search.Ranked = undefined;
+        const np = if (isSettings(query)) 0 else panes.rank(query, &pane_rows);
+        for (pane_rows[0..np]) |x| r.push(.{ .kind = .pane, .app = x.index, .match = x.match });
         // The search for what was typed, its completions (as many as leave
         // room for the rest), then Grok and X.
-        const room = max_rows - r.n - handoffs;
+        const room = max_rows - r.n - handoffs - @intFromBool(np > 0);
         r.push(.{ .kind = .search_web });
         for (0..@min(web.len, max_web, room)) |i| r.push(.{ .kind = .suggest, .web = @intCast(i) });
         r.push(.{ .kind = .ask_grok });
@@ -154,7 +168,7 @@ pub fn url(buf: []u8, kind: Kind, query: []const u8) []const u8 {
         .ask_grok => "https://grok.com/?q=",
         .search_x => "https://x.com/search?f=live&q=",
         .search_web, .suggest => "https://www.google.com/search?q=",
-        .calc, .app, .settings => return "",
+        .calc, .app, .settings, .pane => return "",
     };
     var w: std.Io.Writer = .fixed(buf);
     w.writeAll(base) catch return "";
@@ -226,4 +240,24 @@ test "math first, then apps; ask and search only without an answer" {
 test "queries are escaped into the address" {
     var buf: [128]u8 = undefined;
     try std.testing.expectEqualStrings("https://x.com/search?f=live&q=liquid+glass+%26+UI", url(&buf, .search_x, " liquid glass & UI "));
+}
+
+test "System Settings' panes come under the apps and keep the panel's height (#12)" {
+    if (!mac) return error.SkipZigTest;
+    const t = std.testing;
+    const names = [_][]const u8{ "Safari", "System Settings", "Calculator" };
+    var r: Results = .{};
+    r.build("login items", &names, &.{}, &.{}, &.{ "login items mac", "login items windows", "login items iphone" });
+    try t.expectEqual(Kind.pane, r.rows[0].kind);
+    try t.expectEqualStrings("System Settings", r.section(0).?);
+    try t.expectEqualStrings("Login Items & Extensions", panes.all[r.rows[0].app].name);
+    // Google's completions give up a row for the section's header.
+    try t.expect(r.n <= max_rows - 1);
+    // "settings" is Nanolight's own Settings and System Settings the app,
+    // not every pane with "settings" in a word for it.
+    r.build("settings", &names, &.{}, &.{}, &.{});
+    for (r.slice()) |row| try t.expect(row.kind != .pane);
+    // Math lists no panes.
+    r.build("2+2", &names, &.{}, &.{}, &.{});
+    try t.expectEqual(@as(usize, 1), r.n);
 }

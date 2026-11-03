@@ -105,3 +105,40 @@ test "Settings hides the menu bar icon and sends searches out (issues #8, #10)" 
     try std.testing.expect(quit.y + quit.h <= settings_view.height);
     try std.testing.expect(settings_view.height <= view.max_height);
 }
+
+test "System Settings' panes open from the panel, which stays in its window (#12)" {
+    if (!mac) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    var ix: Index = .init(gpa);
+    defer ix.deinit();
+    try ix.add("System Settings", "/System/Applications/System Settings.app");
+    for ([_][]const u8{ "Sound A", "Sound B", "Sound C", "Sound D", "Sound E", "Sound F" }) |n| {
+        var buf: [64]u8 = undefined;
+        try ix.add(n, try std.fmt.bufPrint(&buf, "/Applications/{s}.app", .{n}));
+    }
+    var web: tests.Web = .{};
+    var s: view.Nanolight = .{ .index = &ix };
+    defer s.query.deinit();
+    s.host = web.host();
+    s.reveal();
+    var t: ui.Tester = undefined;
+    try t.init(gpa, .init(&s, view.Nanolight.view), .{ .width = view.width, .height = view.max_height, .dark = true });
+    defer t.deinit();
+    t.settle(1);
+    tests.press(&t, &.{.{ .insert = "login items" }});
+    try std.testing.expect(t.hasText("Login Items & Extensions"));
+    try std.testing.expect(t.hasText("Open in System Settings"));
+    tests.press(&t, &.{.{ .command = .insert_newline }});
+    try std.testing.expectEqualStrings("x-apple.systempreferences:com.apple.LoginItems-Settings.extension", web.probe.opened[0..web.probe.opened_len]);
+    try std.testing.expect(web.probe.hidden);
+    // Every app row, a pane, and Google's completions: the tallest list
+    // with four sections still fits.
+    s.reveal();
+    tests.press(&t, &.{ .{ .command = .select_all }, .{ .command = .delete_backward }, .{ .insert = "sound" } });
+    var four: @import("suggest.zig").List = .{};
+    for ([_][]const u8{ "sound 1", "sound 2", "sound 3", "sound 4" }) |w| four.push(w);
+    s.answered("sound", &four);
+    t.settle(1);
+    try std.testing.expect(t.hasText("System Settings"));
+    try std.testing.expect(s.height() <= view.max_height);
+}

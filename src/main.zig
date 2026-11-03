@@ -102,7 +102,7 @@ pub const Live = struct {
 
     fn open(ctx: *anyopaque, target: []const u8) void {
         const l: *Live = @ptrCast(@alignCast(ctx));
-        if (std.mem.startsWith(u8, target, "https://") or std.mem.startsWith(u8, target, "http://")) {
+        if (apps.isUrl(target)) {
             _ = nanoui.shell.openUrl(target);
         } else if (rc.isCommand(target)) {
             rc.start(l, target);

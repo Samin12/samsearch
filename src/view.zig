@@ -398,6 +398,11 @@ pub const Nanolight = struct {
                 ui.richText(c, a.name, s.highlight(i, r, p), .{ .size = 13.5, .weight = .medium, .color = p.text.alpha(0.82) });
                 ui.text(c, a.folder, .{ .size = 12, .color = p.sub.alpha(0.8) });
             },
+            .pane => {
+                const pane = @import("settings_panes.zig").all[r.app];
+                ui.richText(c, pane.name, s.highlight(i, r, p), .{ .size = 13.5, .weight = .medium, .color = p.text.alpha(0.82) });
+                ui.text(c, "System Settings", .{ .size = 12, .color = p.sub.alpha(0.8) });
+            },
             .settings => {
                 ui.text(c, "Nanolight Settings", .{ .size = 13.5, .weight = .medium, .color = p.text });
                 ui.text(c, "Shortcut, sync, updates", .{ .size = 12, .color = p.sub.alpha(0.8) });
@@ -422,7 +427,7 @@ pub const Nanolight = struct {
         }
         ui.spacer(c);
         if (i == s.sel) {
-            ui.text(c, if (r.kind == .app or r.kind == .settings) "Open" else "Go", .{ .size = 12, .weight = .medium, .color = p.sub });
+            ui.text(c, if (r.kind == .app or r.kind == .settings or r.kind == .pane) "Open" else "Go", .{ .size = 12, .weight = .medium, .color = p.sub });
             ui.kbd(c, "↩");
         } else if (i < 9) ui.textf(c, .{ .size = 12, .weight = .medium, .color = p.sub.alpha(0.5), .tabular = true }, "{s}{d}", .{ results.mod, i + 1 });
     }
@@ -433,10 +438,12 @@ pub const Nanolight = struct {
 
     /// The row's picture: the app's icon, or a symbol on a quiet tile.
     fn tile(s: *Nanolight, c: *ui.Context, p: Palette, r: Row) void {
-        if (r.kind == .app) if (s.index.icon(r.app)) |png| {
+        // A pane: System Settings' own icon.
+        const app = if (r.kind == .pane) s.index.find("System Settings") else if (r.kind == .app) r.app else null;
+        if (app) |a| if (s.index.icon(a)) |png| {
             const box = ui.div(c).size(26, 26).center();
             defer box.end();
-            _ = ui.image(c, .{ .key = s.index.apps.items[r.app].path, .bytes = png, .max_width = 26, .max_height = 26, .radius = 0, .scale = 1 });
+            _ = ui.image(c, .{ .key = s.index.apps.items[a].path, .bytes = png, .max_width = 26, .max_height = 26, .radius = 0, .scale = 1 });
             return;
         };
         const big = r.kind == .calc;
@@ -531,6 +538,7 @@ pub const Nanolight = struct {
             .ask_grok, .search_x => s.go(results.url(&s.url_buf, r.kind, s.query.text())),
             .search_web => s.search(s.query.text(), !s.searches_out),
             .settings => s.openSettings(),
+            .pane => s.go(@import("settings_panes.zig").urls[r.app]),
             .suggest => {
                 // Its words fill the field, as a search box's would.
                 s.query.set(s.web.get(r.web));

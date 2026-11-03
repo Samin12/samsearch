@@ -41,6 +41,13 @@ pub fn scanSystem(ix: *Index, io: std.Io, env: *const std.process.Environ.Map) v
     ix.sort();
 }
 
+/// An address for the browser or the system (a pane of System Settings),
+/// not a file to open.
+pub fn isUrl(target: []const u8) bool {
+    for ([_][]const u8{ "https://", "http://", @import("settings_panes.zig").url_prefix }) |p| if (std.mem.startsWith(u8, target, p)) return true;
+    return false;
+}
+
 /// Opens an app found by `scanSystem` (or a file, a folder).
 pub fn launch(io: std.Io, path: []const u8) bool {
     if (builtin.os.tag == .linux and std.mem.endsWith(u8, path, ".desktop")) return @import("apps_linux.zig").launch(io, path);

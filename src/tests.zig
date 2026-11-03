@@ -15,6 +15,7 @@ test {
     _ = @import("settings.zig");
     _ = @import("apps.zig");
     _ = @import("shortcut.zig");
+    _ = @import("settings_panes.zig");
     _ = @import("raycast_model.zig");
     _ = @import("raycast.zig");
     _ = @import("raycast_view.zig");

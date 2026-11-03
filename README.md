@@ -11,6 +11,7 @@ Apps, math, Google, Grok, X and Raycast extensions: one keystroke away. Native Z
 ## What it does
 
 - **Finds apps as you type**: whole names, starts of words, initials (`ss` is System Settings), letters in order, and typos (`chorme` is Chrome). What you open often climbs.
+- **System Settings panes** (Mac): "login items", "wifi" or "dark mode" lists the pane, under the apps, and Return opens System Settings right at it.
 - **Completes inline**: the rest of the top app's name, or of Google's top suggestion, is drawn faintly after the caret. Tab or → takes it; Return never does.
 - **Does math**: `2^10 * 3` answers 3,072 (and `0xC00`). Return copies it.
 - **Google suggestions**: up to four, under the apps, the words you add in bold. Nothing that reads as an address (a dot, a slash, an @) is sent.
