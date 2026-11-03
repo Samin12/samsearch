@@ -115,6 +115,7 @@ pub const Index = struct {
         const text = @import("text.zig");
         const a = ix.arena.allocator();
         for (ix.apps.items) |*app| {
+            if (!wantsLocalizedDisplayName(app.path)) continue;
             if (displayNameInto(a, app.path)) |loc| {
                 if (!std.ascii.eqlIgnoreCase(loc, app.name)) app.name = loc;
             }
@@ -216,7 +217,7 @@ pub const Index = struct {
         kv.set(store_key, aw.written()) catch {};
     }
 
-    /// The counts `opened` kept. Keys are `.app` paths; older rows used
+    /// The counts `opened` kept. Keys are app paths; older rows used
     /// display names and are still read once.
     pub fn load(ix: *Index, store: nanoui.kv.Store) void {
         const v = (store.get(ix.gpa, store_key) catch null) orelse return;
@@ -264,6 +265,12 @@ fn openApp(path: []const u8) void {
     const config = objc.msg(objc.Object, objc.class("NSWorkspaceOpenConfiguration"), "configuration", .{});
     const ws = objc.msg(objc.Object, objc.class("NSWorkspace"), "sharedWorkspace", .{});
     objc.msg(void, ws, "openApplicationAtURL:configuration:completionHandler:", .{ url, config, @as(?*anyopaque, null) });
+}
+
+fn wantsLocalizedDisplayName(path: []const u8) bool {
+    if (std.mem.indexOf(u8, path, "zig-cache") != null) return false;
+    for (roots) |r| if (std.mem.startsWith(u8, path, r)) return true;
+    return std.mem.indexOf(u8, path, "/Applications/") != null;
 }
 
 /// The Finder's icon for `path`, drawn at 64 pixels and encoded as PNG.
@@ -362,6 +369,21 @@ test "a second look tells an app installed since from no change (#15)" {
     later.scan(t.io, home);
     try t.expect(!ix.same(&later));
     try t.expect(later.find("DOSBox-X") != null);
+}
+
+test "launch counts resolve stored paths on Windows-style keys" {
+    const t = std.testing;
+    var ix: Index = .init(t.allocator);
+    defer ix.deinit();
+    try ix.add("Explorer", "C:\\Windows\\explorer.exe");
+    const i = ix.findPath("C:\\Windows\\explorer.exe").?;
+    ix.opened(i, null);
+    var mem: nanoui.kv.Memory = .{ .gpa = t.allocator };
+    defer mem.deinit();
+    ix.save(mem.store());
+    ix.launches.items[i] = 0;
+    ix.load(mem.store());
+    try t.expectEqual(@as(u16, 1), ix.launches.items[i]);
 }
 
 test "launch counts follow the app path when the display name changes" {

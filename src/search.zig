@@ -329,7 +329,9 @@ pub const Ranked = struct {
     }
 };
 
-const Index = @import("apps.zig").Index;
+const apps = @import("apps.zig");
+const App = apps.App;
+const Index = apps.Index;
 
 /// The best `out.len` of `names` for `query`, best first, with `boost`
 /// (how often each was opened) added to its score.
@@ -339,44 +341,26 @@ pub fn rank(query: []const u8, names: []const []const u8, boost: []const u16, ou
 
 /// Like `rank`, with optional `pinyin` per name (same length as `names`).
 pub fn rankNames(query: []const u8, names: []const []const u8, pinyin: []const []const u8, boost: []const u16, out: []Ranked) usize {
-    var n: usize = 0;
-    for (names, 0..) |name, i| {
-        var m = score(query, name);
-        const py = if (i < pinyin.len) pinyin[i] else "";
-        if (py.len > 0) {
-            if (scoreAscii(query, py)) |mp| {
-                var via = mp;
-                via.score -= 70;
-                via.n = 0;
-                if (m == null or via.score > m.?.score) m = via;
-            }
-        }
-        const hit = m orelse continue;
-        var scored = hit;
-        if (i < boost.len) scored.score += @min(@as(i32, boost[i]) * 25, 250);
-        const r: Ranked = .{ .index = @intCast(i), .match = scored };
-        if (n < out.len) {
-            out[n] = r;
-            n += 1;
-            continue;
-        }
-        // Full: replace the worst kept one if this is better.
-        var worst: usize = 0;
-        for (out[1..n], 1..) |o, j| if (o.match.score < out[worst].match.score) {
-            worst = j;
-        };
-        if (scored.score > out[worst].match.score) out[worst] = r;
-    }
-    std.sort.pdq(Ranked, out[0..n], {}, Ranked.before);
-    return n;
+    return rankListed(query, names, pinyin, null, boost, out);
 }
 
 /// Ranks apps using each entry's display name and optional pinyin key.
 pub fn rankApps(query: []const u8, ix: *const Index, boost: []const u16, out: []Ranked) usize {
+    return rankListed(query, ix.names.items, &.{}, ix.apps.items, boost, out);
+}
+
+fn rankListed(
+    query: []const u8,
+    names: []const []const u8,
+    pinyin: []const []const u8,
+    apps_list: ?[]const App,
+    boost: []const u16,
+    out: []Ranked,
+) usize {
     var n: usize = 0;
-    for (ix.names.items, 0..) |name, i| {
+    for (names, 0..) |name, i| {
         var m = score(query, name);
-        const py = ix.apps.items[i].pinyin;
+        const py = if (apps_list) |list| list[i].pinyin else if (i < pinyin.len) pinyin[i] else "";
         if (py.len > 0) {
             if (scoreAscii(query, py)) |mp| {
                 var via = mp;
@@ -395,9 +379,9 @@ pub fn rankApps(query: []const u8, ix: *const Index, boost: []const u16, out: []
             continue;
         }
         var worst: usize = 0;
-        for (out[1..n], 1..) |o, j| {
-            if (o.match.score < out[worst].match.score) worst = j;
-        }
+        for (out[1..n], 1..) |o, j| if (o.match.score < out[worst].match.score) {
+            worst = j;
+        };
         if (scored.score > out[worst].match.score) out[worst] = r;
     }
     std.sort.pdq(Ranked, out[0..n], {}, Ranked.before);

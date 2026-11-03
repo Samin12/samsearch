@@ -226,12 +226,11 @@ pub const Nanolight = struct {
         // Tab takes the faint completion, as → does.
         const more = s.completion();
         if (more.len > 0 and c.shortcut(.{ .key = S.tab })) s.take(more);
-        const composing = c.focused_text != null and c.focused_text.?.marked != null;
         const n = s.res.n;
-        if (!composing and (c.shortcut(.{ .key = S.down }) or c.shortcut(.{ .key = 'n', .ctrl = true }))) {
+        if (c.shortcut(.{ .key = S.down }) or c.shortcut(.{ .key = 'n', .ctrl = true })) {
             if (n > 0) s.sel = (s.sel + 1) % n;
         }
-        if (!composing and (c.shortcut(.{ .key = S.up }) or c.shortcut(.{ .key = 'p', .ctrl = true }))) {
+        if (c.shortcut(.{ .key = S.up }) or c.shortcut(.{ .key = 'p', .ctrl = true })) {
             if (n > 0) s.sel = (s.sel + n - 1) % n;
         }
         // ⌘1…⌘9: the row of that number, at once.
