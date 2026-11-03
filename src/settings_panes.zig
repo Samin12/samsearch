@@ -85,12 +85,18 @@ fn present(i: usize) bool {
     if (!looked) {
         const io = std.Io.Threaded.global_single_threaded.io();
         var buf: [256]u8 = undefined;
+        // Most panes are system extensions; some (General, on macOS 26)
+        // ship inside System Settings itself.
+        const dirs = [_][]const u8{ "/System/Library/ExtensionKit/Extensions", "/System/Applications/System Settings.app/Contents/PlugIns" };
         for (all, 0..) |p, k| {
-            const path = std.fmt.bufPrint(&buf, "/System/Library/ExtensionKit/Extensions/{s}.appex", .{p.appex}) catch {
-                have[k] = false;
-                continue;
-            };
-            have[k] = if (std.Io.Dir.accessAbsolute(io, path, .{})) true else |_| false;
+            have[k] = false;
+            for (dirs) |d| {
+                const path = std.fmt.bufPrint(&buf, "{s}/{s}.appex", .{ d, p.appex }) catch continue;
+                if (std.Io.Dir.accessAbsolute(io, path, .{})) |_| {
+                    have[k] = true;
+                    break;
+                } else |_| {}
+            }
         }
         looked = true;
     }
