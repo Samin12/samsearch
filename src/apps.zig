@@ -309,7 +309,7 @@ fn pinyinKey(a: std.mem.Allocator, name: []const u8) ?[]const u8 {
     return a.dupe(u8, buf[0..n]) catch null;
 }
 
-fn iconPng(gpa: std.mem.Allocator, path: []const u8) ?[]u8 {
+pub fn iconPng(gpa: std.mem.Allocator, path: []const u8) ?[]u8 {
     const pool = objc.Pool.push();
     defer pool.pop();
     const ws = objc.msg(objc.Object, objc.class("NSWorkspace"), "sharedWorkspace", .{});

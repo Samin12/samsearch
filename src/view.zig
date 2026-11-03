@@ -8,6 +8,8 @@ const ui = nanoui.ui;
 const motion = ui.motion;
 const Index = @import("apps.zig").Index;
 const results = @import("results.zig");
+const files = @import("files.zig");
+const files_view = @import("files_view.zig");
 const suggest = @import("suggest.zig");
 const text = @import("text.zig");
 const settings_view = @import("settings_view.zig");
@@ -22,14 +24,13 @@ pub const Host = struct {
     hide: *const fn (ctx: *anyopaque) void,
     /// The panel's height changed: a window follows it.
     resize: ?*const fn (ctx: *anyopaque, h: f32) void = null,
-    /// Google's completions of a query aren't known: ask for them, and
-    /// answer with `Nanolight.answered`. Without it, none are listed.
+    /// Request completions, returned through `Nanolight.answered`.
     suggest: ?*const fn (ctx: *anyopaque, query: []const u8) void = null,
+    files: ?*const fn (ctx: *anyopaque, query: []const u8) void = null,
     /// Shows a search's page in the panel, over `webArea`; null takes it
     /// away. Without it, searches open in the browser.
     preview: ?*const fn (ctx: *anyopaque, url: ?[]const u8) void = null,
-    /// Settings (the shortcut, login, sync, updates). Without it the
-    /// screen still draws, and changes nothing the app keeps.
+    /// Settings callbacks; without them, changes are not persisted.
     settings: ?*const SettingsHost = null,
 };
 
@@ -99,6 +100,9 @@ pub const Nanolight = struct {
     note: []const u8 = "",
     /// The first-run welcome, drawn while it is active.
     onboard: ?*@import("onboard.zig").Onboard = null,
+    /// Local file search is opt-in on this Mac.
+    files_on: bool = false,
+    found: files.List = .{},
     /// Google's completions: whether to ask, those listed, the answers.
     suggest_on: bool = true,
     web: suggest.List = .{},
@@ -225,7 +229,7 @@ pub const Nanolight = struct {
         if (c.shortcut(.{ .key = S.enter, .cmd = true })) s.activateOut(c);
         // Tab takes the faint completion, as → does.
         const more = s.completion();
-        if (more.len > 0 and c.shortcut(.{ .key = S.tab })) s.take(more);
+        if (!files_view.takeOnTab(s, c) and more.len > 0 and c.shortcut(.{ .key = S.tab })) s.take(more);
         const n = s.res.n;
         if (c.shortcut(.{ .key = S.down }) or c.shortcut(.{ .key = 'n', .ctrl = true })) {
             if (n > 0) s.sel = (s.sel + 1) % n;
@@ -282,7 +286,6 @@ pub const Nanolight = struct {
         return "";
     }
 
-    /// The completion `more` added to the query, the caret after it.
     fn take(s: *Nanolight, more: []const u8) void {
         var buf: [suggest.max_len * 2]u8 = undefined;
         const q = s.query.text();
@@ -294,13 +297,13 @@ pub const Nanolight = struct {
         s.query.want_selection = .{ len, len };
     }
 
-    /// The rows for the query, if it changed since they were built: with
-    /// what is known of Google's completions of it, asked for if not all.
+    /// Rebuild changed queries, asking for missing completions.
     pub fn rebuild(s: *Nanolight) void {
         const q = s.query.text();
         const h = std.hash.Wyhash.hash(0, q);
         if (h == s.built) return;
         s.built = h;
+        files_view.rebuild(s);
         s.web.n = 0;
         if (s.host) |host| if (host.suggest) |ask| if (s.suggest_on and suggest.eligible(q) and @import("calc.zig").eval(q) == null) {
             if (!s.cache.lookup(q, &s.web)) ask(host.ctx, q);
@@ -311,11 +314,11 @@ pub const Nanolight = struct {
         s.sel = 0;
     }
 
-    fn fill(s: *Nanolight) void {
+    pub fn fill(s: *Nanolight) void {
         var sug: [results.max_apps]u32 = undefined;
         const ns = s.index.suggestions(&sug);
         var web: [suggest.max_rows][]const u8 = undefined;
-        s.res.build(s.query.text(), s.index, sug[0..ns], s.web.slices(&web));
+        s.res.build(s.query.text(), s.index, sug[0..ns], s.web.slices(&web), &s.found);
     }
 
     /// Google's completions of `typed` (what `Host.suggest` asked): kept,
@@ -339,7 +342,8 @@ pub const Nanolight = struct {
         const r = was orelse return;
         for (s.res.slice(), 0..) |now, i| {
             const same_row = now.kind == r.kind and switch (r.kind) {
-                .app => now.app == r.app,
+                .app, .pane => now.app == r.app,
+                .file => now.file == r.file,
                 .suggest => suggest.same(s.web.get(now.web), was_text[0..was_len]),
                 else => true,
             };
@@ -349,6 +353,8 @@ pub const Nanolight = struct {
             }
         }
     }
+
+    pub const filesAnswered = files_view.filesAnswered;
 
     fn list(s: *Nanolight, c: *ui.Context, p: Palette) void {
         const box = ui.div(c).column().wFull().p(list_pad);
@@ -404,6 +410,7 @@ pub const Nanolight = struct {
                 ui.richText(c, pane.name, s.highlight(i, r, p), .{ .size = 13.5, .weight = .medium, .color = p.text.alpha(0.82) });
                 ui.text(c, "System Settings", .{ .size = 12, .color = p.sub.alpha(0.8) });
             },
+            .file => files_view.row(s, c, p, i, r),
             .settings => {
                 ui.text(c, "Nanolight Settings", .{ .size = 13.5, .weight = .medium, .color = p.text });
                 ui.text(c, "Shortcut, sync, updates", .{ .size = 12, .color = p.sub.alpha(0.8) });
@@ -428,7 +435,7 @@ pub const Nanolight = struct {
         }
         ui.spacer(c);
         if (i == s.sel) {
-            ui.text(c, if (r.kind == .app or r.kind == .settings or r.kind == .pane) "Open" else "Go", .{ .size = 12, .weight = .medium, .color = p.sub });
+            ui.text(c, if (r.kind == .app or r.kind == .file or r.kind == .settings or r.kind == .pane) "Open" else "Go", .{ .size = 12, .weight = .medium, .color = p.sub });
             ui.kbd(c, "↩");
         } else if (i < 9) ui.textf(c, .{ .size = 12, .weight = .medium, .color = p.sub.alpha(0.5), .tabular = true }, "{s}{d}", .{ results.mod, i + 1 });
     }
@@ -447,6 +454,7 @@ pub const Nanolight = struct {
             _ = ui.image(c, .{ .key = s.index.apps.items[a].path, .bytes = png, .max_width = 26, .max_height = 26, .radius = 0, .scale = 1 });
             return;
         };
+        if (r.kind == .file) return files_view.tile(s, c, p, r);
         const big = r.kind == .calc;
         const side: f32 = if (big) 34 else 26;
         const box = ui.div(c).size(side, side).rounded(if (big) 9 else 7).bg(p.tile).center();
@@ -466,7 +474,7 @@ pub const Nanolight = struct {
     }
 
     /// The matched letters, full strength and heavier.
-    fn highlight(s: *Nanolight, i: usize, r: Row, p: Palette) []const ui.Span {
+    pub fn highlight(s: *Nanolight, i: usize, r: Row, p: Palette) []const ui.Span {
         const hits = r.match.matched();
         var n: usize = 0;
         var k: usize = 0;
@@ -536,6 +544,7 @@ pub const Nanolight = struct {
                 s.index.opened(r.app, s.kv);
                 s.go(s.index.apps.items[r.app].path);
             },
+            .file => s.go(s.found.entries[r.file].path()),
             .ask_grok, .search_x => s.go(results.url(&s.url_buf, r.kind, s.query.text())),
             .search_web => s.search(s.query.text(), !s.searches_out),
             .settings => s.openSettings(),

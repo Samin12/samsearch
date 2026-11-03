@@ -23,6 +23,7 @@ test {
     _ = @import("script_run.zig");
     _ = @import("tests_ext.zig");
     _ = @import("tests_prefs.zig");
+    _ = @import("tests_files.zig");
     switch (@import("builtin").os.tag) {
         .macos => {
             _ = @import("single_mac.zig");

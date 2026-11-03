@@ -6,10 +6,7 @@
 //! results in the panel (preview.zig). Its panel is the system's vibrancy
 //! (NSVisualEffectView, as launchers use), nanoui drawing on it.
 //! It lives in the menu bar: no Dock icon, nothing drawn while idle.
-//!
-//! `zig build run`, or `zig build app` and open zig-out/Nanolight.app
-//! (its icon, icon.png, is drawn by tools/icon.py).
-//! The walkthrough film, rendered offscreen: `tools/film.sh` (film.zig).
+//! `zig build run`, or `zig build app` and open zig-out/Nanolight.app.
 const std = @import("std");
 const builtin = @import("builtin");
 const nanoui = @import("nanoui");
@@ -33,7 +30,6 @@ const Recorder = if (mac) @import("recorder.zig").Recorder else @import("pc_stub
 const account = @import("account.zig");
 const rc = @import("raycast_live.zig");
 const Settings = @import("settings.zig").Settings;
-
 const suggest_key = "nanolight.suggest";
 /// "1": Return opens searches in the browser (issue #10).
 const searches_out_key = "nanolight.searches_out";
@@ -76,6 +72,7 @@ pub const Live = struct {
     asking: [suggest.max_len]u8 = undefined,
     asking_len: usize = 0,
     waiting: u32 = 0,
+    files: @import("files_live.zig").State = .{},
     /// Updates from GitHub's releases (a signed build only), and the menu
     /// bar icon whose menu offers one once it's ready.
     updater: ?*nanoui.Updater = null,
@@ -97,7 +94,7 @@ pub const Live = struct {
     fn host(l: *Live) view.Host {
         const bind = @import("settings_bind.zig");
         bind.box.ctx = l;
-        return .{ .ctx = l, .open = open, .hide = hide, .resize = resize, .suggest = ask, .preview = if (mac) showPage else null, .settings = &bind.box };
+        return .{ .ctx = l, .open = open, .hide = hide, .resize = resize, .suggest = ask, .files = if (mac) @import("files_live.zig").askFiles else null, .preview = if (mac) showPage else null, .settings = &bind.box };
     }
 
     fn open(ctx: *anyopaque, target: []const u8) void {
@@ -521,8 +518,10 @@ pub fn main(init: std.process.Init) !void {
     var o: Onboard = .{};
     var s: Nanolight = .{ .index = &index, .kv = kv, .onboard = &o };
     defer s.query.deinit();
+    defer s.found.deinit();
     var live: Live = .{ .app = app, .s = &s, .o = &o, .kv = kv, .choice = shortcut.load(kv, init.gpa) };
     s.host = live.host();
+    @import("files_live.zig").load(&live);
     // Google's completions are on unless turned off in Settings.
     if (kv.get(init.gpa, suggest_key) catch null) |v| {
         defer init.gpa.free(v);
