@@ -262,9 +262,10 @@ test "queries are escaped into the address" {
 test "System Settings' panes come under the apps and keep the panel's height (#12)" {
     if (!mac) return error.SkipZigTest;
     const t = std.testing;
-    const names = [_][]const u8{ "Safari", "System Settings", "Calculator" };
+    var ix = try testIndex(t.allocator, &.{ "Safari", "System Settings", "Calculator" });
+    defer ix.deinit();
     var r: Results = .{};
-    r.build("login items", &names, &.{}, &.{}, &.{ "login items mac", "login items windows", "login items iphone" });
+    r.build("login items", &ix, &.{}, &.{ "login items mac", "login items windows", "login items iphone" });
     try t.expectEqual(Kind.pane, r.rows[0].kind);
     try t.expectEqualStrings("System Settings", r.section(0).?);
     try t.expectEqualStrings("Login Items & Extensions", panes.all[r.rows[0].app].name);
@@ -272,9 +273,9 @@ test "System Settings' panes come under the apps and keep the panel's height (#1
     try t.expect(r.n <= max_rows - 1);
     // "settings" is Nanolight's own Settings and System Settings the app,
     // not every pane with "settings" in a word for it.
-    r.build("settings", &names, &.{}, &.{}, &.{});
+    r.build("settings", &ix, &.{}, &.{});
     for (r.slice()) |row| try t.expect(row.kind != .pane);
     // Math lists no panes.
-    r.build("2+2", &names, &.{}, &.{}, &.{});
+    r.build("2+2", &ix, &.{}, &.{});
     try t.expectEqual(@as(usize, 1), r.n);
 }
