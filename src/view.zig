@@ -51,7 +51,7 @@ pub const footer_h = 38;
 const list_pad = 6;
 /// The room a window leaves round the panel for its shadow (`Nanolight.margin`).
 pub const shadow_margin: f32 = 40;
-/// The tallest the panel gets: every app row, the three web rows and
+/// The tallest the panel gets: every app row, the four handoff rows and
 /// Google's completions, under three section heads (math lists fewer), or
 /// a search's page. The window is this tall.
 pub const max_height: f32 = header_h + footer_h + 2 + list_pad * 2 + results.max_rows * row_h + 3 * section_h;
@@ -110,6 +110,9 @@ pub const Nanolight = struct {
     /// A search's page is in the panel, for the query as it was then.
     previewing: bool = false,
     preview_q: u64 = 0,
+    preview_kind: results.Kind = .search_web,
+    preview_answer_buf: [1024]u8 = undefined,
+    preview_answer: []const u8 = "",
     preview_buf: [1024]u8 = undefined,
     preview_url: []const u8 = "",
     /// Settings, drawn in the panel in place of the rows.
@@ -195,7 +198,11 @@ pub const Nanolight = struct {
                 ui.div(c).wFull().h(1).bg(p.hair).end();
                 const wait = ui.div(c).wFull().h(webArea(h).h).center();
                 defer wait.end();
-                ui.text(c, "Searching Google…", .{ .size = 13, .color = p.sub.alpha(0.8) });
+                ui.text(c, switch (s.preview_kind) {
+                    .quick_ask => "Asking…",
+                    .digup => "Searching DigUp…",
+                    else => "Searching Google…",
+                }, .{ .size = 13, .color = p.sub.alpha(0.8) });
             } else if (s.res.n > 0) {
                 ui.div(c).wFull().h(1).bg(p.hair).end();
                 s.list(c, p);
@@ -219,7 +226,7 @@ pub const Nanolight = struct {
     fn keys(s: *Nanolight, c: *ui.Context) void {
         const S = ui.Shortcut;
         if (s.previewing) {
-            if (c.shortcut(.{ .key = S.enter, .cmd = true })) s.go(s.preview_url);
+            if (c.shortcut(.{ .key = S.enter, .cmd = true })) s.openPreviewOut(null);
             if (c.shortcut(.{ .key = S.escape })) s.back();
             return;
         }
@@ -257,7 +264,7 @@ pub const Nanolight = struct {
             .bare = true,
             .size = 21,
             .width = .fill,
-            .placeholder = "Search apps, do math, ask Grok…",
+            .placeholder = "Search apps, do math, ask anything…",
             .placeholder_color = p.sub.alpha(0.75),
             .color = p.text,
         });
@@ -412,23 +419,25 @@ pub const Nanolight = struct {
             },
             .file => files_view.row(s, c, p, i, r),
             .settings => {
-                ui.text(c, "Nanolight Settings", .{ .size = 13.5, .weight = .medium, .color = p.text });
+                ui.text(c, "SamSearch Settings", .{ .size = 13.5, .weight = .medium, .color = p.text });
                 ui.text(c, "Shortcut, sync, updates", .{ .size = 12, .color = p.sub.alpha(0.8) });
             },
             .suggest => {
                 const w = s.web.get(r.web);
                 ui.richText(c, w, s.added(i, w, p), .{ .size = 13.5, .color = p.text.alpha(0.72), .truncate = .ellipsis });
             },
-            .ask_grok, .search_x, .search_web => {
+            .quick_ask, .new_thread, .digup, .search_web => {
                 const verb = switch (r.kind) {
-                    .ask_grok => "Ask Grok",
-                    .search_x => "Search X for",
+                    .quick_ask => "Ask",
+                    .new_thread => "New T3 thread:",
+                    .digup => "Search DigUp for",
                     else => "Search Google for",
                 };
                 ui.textf(c, .{ .size = 13.5, .weight = .medium, .color = p.text, .truncate = .ellipsis }, "{s} “{s}”", .{ verb, std.mem.trim(u8, q, " ") });
                 ui.text(c, switch (r.kind) {
-                    .ask_grok => "grok.com",
-                    .search_x => "x.com · Latest",
+                    .quick_ask => "Haiku · sees your screen",
+                    .new_thread => "T3 Code · default settings",
+                    .digup => "Files, screenshots, email and Drive",
                     else => "google.com",
                 }, .{ .size = 12, .color = p.sub.alpha(0.8) });
             },
@@ -459,13 +468,11 @@ pub const Nanolight = struct {
         const side: f32 = if (big) 34 else 26;
         const box = ui.div(c).size(side, side).rounded(if (big) 9 else 7).bg(p.tile).center();
         defer box.end();
-        if (r.kind == .search_x) {
-            ui.text(c, "𝕏", .{ .size = 15, .weight = .bold, .color = p.text });
-            return;
-        }
         ui.icon(c, switch (r.kind) {
             .calc => "plus.forwardslash.minus",
-            .ask_grok => "sparkles",
+            .quick_ask => "sparkles",
+            .new_thread => "terminal",
+            .digup => "doc.text.magnifyingglass",
             .search_web => "globe",
             .suggest => "magnifyingglass",
             .settings => "gearshape",
@@ -502,7 +509,7 @@ pub const Nanolight = struct {
         const bar = ui.div(c).row().wFull().h(footer_h).px(16).gap(8).itemsCenter();
         defer bar.end();
         appIcon(c, 16);
-        ui.textf(c, .{ .size = 12, .weight = .medium, .color = p.sub.alpha(0.8) }, "{s} · {d} apps", .{ if (s.note.len > 0) s.note else "Nanolight", s.index.apps.items.len });
+        ui.textf(c, .{ .size = 12, .weight = .medium, .color = p.sub.alpha(0.8) }, "{s} · {d} apps", .{ if (s.note.len > 0) s.note else "SamSearch", s.index.apps.items.len });
         ui.spacer(c);
         {
             ui.key(c, "settings-gear");
@@ -513,9 +520,11 @@ pub const Nanolight = struct {
             ui.text(c, "Settings", .{ .size = 1, .color = p.sub.alpha(0) });
         }
         if (s.previewing) {
-            ui.text(c, "Open in Browser", .{ .size = 12, .weight = .medium, .color = p.text.alpha(0.85) });
-            ui.kbd(c, results.mod ++ "↩");
-            ui.div(c).w(1).h(14).bg(p.hair).end();
+            if (s.preview_kind != .digup) {
+                ui.text(c, if (s.preview_kind == .quick_ask) "Open Answer Window" else "Open in Browser", .{ .size = 12, .weight = .medium, .color = p.text.alpha(0.85) });
+                ui.kbd(c, results.mod ++ "↩");
+                ui.div(c).w(1).h(14).bg(p.hair).end();
+            }
             ui.text(c, "Back", .{ .size = 12, .color = p.sub.alpha(0.8) });
             ui.kbd(c, "esc");
             return;
@@ -545,7 +554,8 @@ pub const Nanolight = struct {
                 s.go(s.index.apps.items[r.app].path);
             },
             .file => s.go(s.found.entries[r.file].path()),
-            .ask_grok, .search_x => s.go(results.url(&s.url_buf, r.kind, s.query.text())),
+            .quick_ask, .digup => s.page(r.kind, s.query.text(), true),
+            .new_thread => s.go(results.url(&s.url_buf, .new_thread, s.query.text())),
             .search_web => s.search(s.query.text(), !s.searches_out),
             .settings => s.openSettings(),
             .pane => s.go(@import("settings_panes.zig").urls[r.app]),
@@ -562,6 +572,7 @@ pub const Nanolight = struct {
         if (s.res.n == 0) return;
         const r = s.res.rows[@min(s.sel, s.res.n - 1)];
         switch (r.kind) {
+            .quick_ask => s.go(results.answerUrl(&s.url_buf, s.query.text())),
             .search_web => s.search(s.query.text(), s.searches_out),
             .suggest => s.search(s.web.get(r.web), s.searches_out),
             else => s.activate(c),
@@ -571,13 +582,31 @@ pub const Nanolight = struct {
     /// Google's page for `words`: in the panel when `in_panel` and the host
     /// can show it there, else in the browser.
     fn search(s: *Nanolight, words: []const u8, in_panel: bool) void {
+        s.page(.search_web, words, in_panel);
+    }
+
+    fn page(s: *Nanolight, kind: results.Kind, words: []const u8, in_panel: bool) void {
         const h = s.host orelse return;
-        const u = results.url(&s.preview_buf, .search_web, words);
+        const u = results.url(&s.preview_buf, kind, words);
         const show = (if (in_panel) h.preview else null) orelse return s.go(u);
         s.preview_url = u;
+        s.preview_kind = kind;
+        s.preview_answer = if (kind == .quick_ask) results.answerUrl(&s.preview_answer_buf, words) else "";
         s.previewing = true;
         s.preview_q = std.hash.Wyhash.hash(0, s.query.text());
         show(h.ctx, u);
+    }
+
+    /// Both the panel and WKWebView use the same page-specific handoff.
+    /// Only Google may open a navigated browser URL; local pages never do.
+    pub fn openPreviewOut(s: *Nanolight, current_url: ?[]const u8) void {
+        if (!s.previewing) return;
+        switch (s.preview_kind) {
+            .quick_ask => s.go(s.preview_answer),
+            .digup => {},
+            .search_web => s.go(current_url orelse s.preview_url),
+            else => {},
+        }
     }
 
     pub fn openSettings(s: *Nanolight) void {

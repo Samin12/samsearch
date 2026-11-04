@@ -1,4 +1,4 @@
-# Builds Nanolight for macOS (Apple silicon), Windows and Linux (x86_64 and
+# Builds SamSearch for macOS (Apple silicon), Windows and Linux (x86_64 and
 # arm64, cross-compiled here) and attaches them, with the update feed the
 # app's updater reads (manifest.json, each archive's sha256), to the GitHub
 # release of the tag that was pushed.
@@ -83,7 +83,7 @@ jobs:
 
       - name: Check
         run: |
-          codesign --verify --strict --verbose=2 zig-out/package/Nanolight.app
+          codesign --verify --strict --verbose=2 zig-out/package/SamSearch.app
           hdiutil verify zig-out/package/nanolight-macos-arm64.dmg
           if [ -n "${NOTARY_KEY_PATH:-}" ]; then
             # Validating asks Apple's CloudKit too, which drops the
@@ -96,7 +96,7 @@ jobs:
               done
               return 1
             }
-            validate zig-out/package/Nanolight.app
+            validate zig-out/package/SamSearch.app
             validate zig-out/package/nanolight-macos-arm64.dmg
           fi
 
@@ -120,7 +120,7 @@ jobs:
         run: |
           tag="$GITHUB_REF_NAME"
           cd zig-out/package
-          gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" --title "Nanolight ${tag#v}" --notes "Nanolight ${tag#v} for macOS 14 and later (Apple silicon: open the disk image and drag Nanolight to Applications), Windows 10 and later (x86_64: unzip and run nanolight.exe) and Linux (x86_64, arm64; X11, GTK 3: unpack and run nanolight)."
+          gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" --title "SamSearch ${tag#v}" --notes "SamSearch ${tag#v} for macOS 14 and later (Apple silicon: open the disk image and drag SamSearch to Applications), Windows 10 and later (x86_64: unzip and run nanolight.exe) and Linux (x86_64, arm64; X11, GTK 3: unpack and run nanolight)."
           gh release upload "$tag" nanolight-macos-arm64.dmg nanolight-macos-arm64.dmg.sha256 nanolight-macos-arm64.zip \
             nanolight-windows-x86_64.zip nanolight-linux-x86_64.tar.gz nanolight-linux-aarch64.tar.gz \
             nanolight-windows-x86_64.zip.sha256 nanolight-linux-x86_64.tar.gz.sha256 nanolight-linux-aarch64.tar.gz.sha256 \

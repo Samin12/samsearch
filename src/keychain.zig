@@ -92,7 +92,7 @@ const File = struct {
     }
 
     fn path(gpa: std.mem.Allocator, service: []const u8, account: []const u8) ?[]u8 {
-        const dir = nanoui.path(gpa, .data, "Nanolight") catch return null;
+        const dir = nanoui.path(gpa, .data, "SamSearch") catch return null;
         defer gpa.free(dir);
         var name: [256]u8 = undefined;
         const base = std.fmt.bufPrint(&name, "secret-{s}-{s}", .{ service, account }) catch return null;

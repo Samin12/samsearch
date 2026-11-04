@@ -88,7 +88,7 @@ pub const Preview = struct {
         objc.msg(void, web, "setAllowsBackForwardNavigationGestures:", .{objc.YES});
         objc.msg(void, web, "setAutoresizingMask:", .{@as(objc.NSUInteger, 0)});
         const cls = objc.defineClass(.{
-            .name = "NanolightPreviewUI",
+            .name = "SamSearchPreviewUI",
             .protocols = &.{"WKUIDelegate"},
             .methods = &.{.{ .name = "webView:createWebViewWithConfiguration:forNavigationAction:windowFeatures:", .imp = &newWindow, .types = "@@:@@@@" }},
         });

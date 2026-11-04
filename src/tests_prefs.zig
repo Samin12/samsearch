@@ -8,7 +8,7 @@ const view = @import("view.zig");
 const settings_view = @import("settings_view.zig");
 const tests = @import("tests.zig");
 const mac = @import("builtin").os.tag == .macos;
-const placeholder = "Search apps, do math, ask Grok…";
+const placeholder = "Search apps, do math, ask anything…";
 
 /// Where the field's placeholder is in the first frame after the panel
 /// shows, and once it has settled.
@@ -101,7 +101,7 @@ test "Settings hides the menu bar icon and sends searches out (issues #8, #10)" 
     t.settle(1);
     try std.testing.expect(prefs.menu_bar_on and !s.searches_out and !prefs.searches_out.?);
     // The rows fit: the last one is inside Settings, Settings in the window.
-    const quit = t.findText("Quit Nanolight").?;
+    const quit = t.findText("Quit SamSearch").?;
     try std.testing.expect(quit.y + quit.h <= settings_view.height);
     try std.testing.expect(settings_view.height <= view.max_height);
 }
@@ -141,4 +141,92 @@ test "System Settings' panes open from the panel, which stays in its window (#12
     t.settle(1);
     try std.testing.expect(t.hasText("System Settings"));
     try std.testing.expect(s.height() <= view.max_height);
+}
+
+test "SamSearch handoffs use local previews and page-specific command Return" {
+    const gpa = std.testing.allocator;
+    // Google's browser preference must never redirect a local helper page.
+    for ([_]bool{ false, true }) |searches_out| {
+        var ix: Index = .init(gpa);
+        defer ix.deinit();
+        var web: tests.Web = .{};
+        var s: view.Nanolight = .{ .index = &ix, .searches_out = searches_out };
+        defer s.query.deinit();
+        s.host = web.host();
+        s.reveal();
+        var t: ui.Tester = undefined;
+        try t.init(gpa, .init(&s, view.Nanolight.view), .{ .width = view.width, .height = view.max_height, .dark = true });
+        defer t.deinit();
+        t.settle(1);
+        tests.press(&t, &.{.{ .insert = "liquid glass & UI" }});
+        try std.testing.expect(t.hasText("Ask “liquid glass & UI”"));
+        try std.testing.expect(t.hasText("Haiku · sees your screen"));
+        try std.testing.expect(t.hasText("New T3 thread: “liquid glass & UI”"));
+        try std.testing.expect(t.hasText("T3 Code · default settings"));
+        try std.testing.expect(t.hasText("Search DigUp for “liquid glass & UI”"));
+        try std.testing.expect(t.hasText("Files, screenshots, email and Drive"));
+        // ⌘2 runs Quick Ask, using the same activation as Return.
+        try std.testing.expect(t.shortcut(.{ .key = '2', .cmd = true }));
+        t.settle(1);
+        try std.testing.expectEqualStrings("http://127.0.0.1:47213/ask?q=liquid+glass+%26+UI", web.page[0..web.page_len.?]);
+        try std.testing.expect(s.previewing and !web.probe.hidden);
+        try std.testing.expect(t.hasText("Open Answer Window"));
+        // The WKWebView callback must also ignore any navigated URL.
+        s.openPreviewOut("http://127.0.0.1:47213/anything-else");
+        try std.testing.expectEqualStrings("quickask://answer?q=liquid+glass+%26+UI", web.probe.opened[0..web.probe.opened_len]);
+        try std.testing.expect(web.probe.hidden);
+        s.reveal();
+        web.probe = .{};
+        t.settle(1);
+        // Direct ⌘↩ on Quick Ask opens the floating window.
+        s.sel = 1;
+        try std.testing.expect(t.shortcut(.{ .key = ui.Shortcut.enter, .cmd = true }));
+        try std.testing.expectEqualStrings("quickask://answer?q=liquid+glass+%26+UI", web.probe.opened[0..web.probe.opened_len]);
+        try std.testing.expect(web.probe.hidden and !s.previewing);
+        s.reveal();
+        web.probe = .{};
+        t.settle(1);
+        s.sel = 1;
+        tests.press(&t, &.{.{ .command = .insert_newline }});
+        try std.testing.expect(s.previewing and !web.probe.hidden);
+        try std.testing.expect(t.shortcut(.{ .key = ui.Shortcut.enter, .cmd = true }));
+        try std.testing.expectEqualStrings("quickask://answer?q=liquid+glass+%26+UI", web.probe.opened[0..web.probe.opened_len]);
+        s.reveal();
+        web.probe = .{};
+        t.settle(1);
+        // ⌘3 creates a thread; Return and ⌘↩ use the same deep link.
+        try std.testing.expect(t.shortcut(.{ .key = '3', .cmd = true }));
+        try std.testing.expectEqualStrings("quickask://t3-thread-create?q=liquid+glass+%26+UI", web.probe.opened[0..web.probe.opened_len]);
+        try std.testing.expect(web.probe.hidden and !s.previewing);
+        for ([_]bool{ false, true }) |command| {
+            s.reveal();
+            web.probe = .{};
+            t.settle(1);
+            s.sel = 2;
+            if (command) {
+                try std.testing.expect(t.shortcut(.{ .key = ui.Shortcut.enter, .cmd = true }));
+            } else tests.press(&t, &.{.{ .command = .insert_newline }});
+            try std.testing.expectEqualStrings("quickask://t3-thread-create?q=liquid+glass+%26+UI", web.probe.opened[0..web.probe.opened_len]);
+            try std.testing.expect(web.probe.hidden and !s.previewing);
+        }
+        s.reveal();
+        web.probe = .{};
+        t.settle(1);
+        // ⌘4 runs DigUp in the panel. ⌘↩ while previewing is a no-op.
+        try std.testing.expect(t.shortcut(.{ .key = '4', .cmd = true }));
+        t.settle(1);
+        try std.testing.expectEqualStrings("http://127.0.0.1:47213/digup?q=liquid+glass+%26+UI", web.page[0..web.page_len.?]);
+        try std.testing.expect(!t.hasText("Open in Browser"));
+        try std.testing.expect(t.shortcut(.{ .key = ui.Shortcut.enter, .cmd = true }));
+        s.openPreviewOut("https://www.google.com/");
+        try std.testing.expect(s.previewing and !web.probe.hidden and web.probe.opened_len == 0);
+        try std.testing.expect(t.shortcut(.{ .key = ui.Shortcut.escape }));
+        try std.testing.expect(!s.previewing and web.page_len == null);
+        // ⌘↩ on the DigUp row uses the same local preview as Return.
+        s.sel = 3;
+        try std.testing.expect(t.shortcut(.{ .key = ui.Shortcut.enter, .cmd = true }));
+        try std.testing.expectEqualStrings("http://127.0.0.1:47213/digup?q=liquid+glass+%26+UI", web.page[0..web.page_len.?]);
+        tests.press(&t, &.{.{ .insert = " ideas" }});
+        try std.testing.expect(!s.previewing and web.page_len == null);
+    }
 }

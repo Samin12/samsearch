@@ -2,7 +2,7 @@
 //! ⌘Space, or the key picked in its welcome (onboard.zig), or from its
 //! menu bar icon; finds apps as you type (initials
 //! too: "ss" is System Settings), answers math, and hands anything else to
-//! Grok, X or Google, with Google's completions of it (suggest.zig) and its
+//! Quick Ask, T3, DigUp or Google, with Google's completions of it (suggest.zig) and its
 //! results in the panel (preview.zig). Its panel is the system's vibrancy
 //! (NSVisualEffectView, as launchers use), nanoui drawing on it.
 //! It lives in the menu bar: no Dock icon, nothing drawn while idle.
@@ -237,8 +237,7 @@ pub const Live = struct {
             .escape => l.s.back(),
             .open_out => {
                 var buf: [2048]u8 = undefined;
-                open(l, l.preview.current(&buf) orelse l.s.preview_url);
-                hide(l);
+                l.s.openPreviewOut(l.preview.current(&buf));
             },
         }
         if (l.window) |w| w.redraw();
@@ -281,9 +280,9 @@ pub const Live = struct {
         const ready = if (l.updater) |u| u.ready() else null;
         const label = if (ready) |v| std.fmt.bufPrint(&l.update_label, "Restart to Update to {s}", .{v}) catch "Restart to Update" else "Check for Updates";
         const acc = l.accountItems();
-        t.setMenu("Nanolight", &.{
+        t.setMenu("SamSearch", &.{
             .{ .label = "Settings…", .accelerator = "Cmd+,", .click = .of(l, Live.menuSettings) },
-            .{ .label = "Open Nanolight", .click = .of(l, Live.menuShow) },
+            .{ .label = "Open SamSearch", .click = .of(l, Live.menuShow) },
             .{ .label = "Welcome…", .click = .of(l, Live.welcome) },
             .{ .label = "Google Suggestions", .kind = .checkbox, .checked = l.s.suggest_on, .click = .of(l, Live.toggleSuggest) },
             .separator,
@@ -291,7 +290,7 @@ pub const Live = struct {
             acc[1],
             .separator,
             .{ .label = label, .disabled = l.updater == null, .click = .of(l, Live.updateNow) },
-            .{ .label = "Quit Nanolight", .role = .quit },
+            .{ .label = "Quit SamSearch", .role = .quit },
         }) catch {};
     }
 
@@ -497,7 +496,7 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, arg, "--version")) {
             var out: [64]u8 = undefined;
             var w = std.Io.File.stdout().writer(init.io, &out);
-            try w.interface.print("nanolight {s}\n", .{version});
+            try w.interface.print("samsearch {s}\n", .{version});
             return w.interface.flush();
         }
         if (std.mem.eql(u8, arg, "--toggle")) {
@@ -508,7 +507,10 @@ pub fn main(init: std.process.Init) !void {
     // Linux: GTK 3, where a window can be put somewhere (GTK 4 lets only
     // the compositor place one), unless the user asked for another.
     if (builtin.os.tag == .linux and std.c.getenv("NANOUI_GTK") == null) _ = setenv("NANOUI_GTK", "3", 0);
-    const app = try nanoui.App.create(init, .{ .name = "Nanolight", .quit_on_last_window_closed = false });
+    // Copy installed commands before app/kv initialization creates the new folder.
+    const data = try @import("data_dir.zig").prepare(init.gpa, init.io);
+    init.gpa.free(data);
+    const app = try nanoui.App.create(init, .{ .name = "SamSearch", .quit_on_last_window_closed = false });
     defer app.destroy();
     var index: Index = .init(init.gpa);
     defer index.deinit();
@@ -535,7 +537,7 @@ pub fn main(init: std.process.Init) !void {
     // The rows first, so a snapshot is as tall as the panel.
     s.rebuild();
     var options: nanoui.WindowOptions = .{
-        .title = "Nanolight",
+        .title = "SamSearch",
         .resizable = false,
         .visible = false,
         .on_key = .{ .ctx = &live, .func = Live.keyChanged },
@@ -558,7 +560,7 @@ pub fn main(init: std.process.Init) !void {
     o.hooks = live.hooks();
     // The first run: the welcome, in the panel.
     if (!shortcut.onboarded(kv)) o.start(live.choice);
-    if (mac) live.tray = try app.newTray(.{ .symbol = "magnifyingglass", .tooltip = "Nanolight" });
+    if (mac) live.tray = try app.newTray(.{ .symbol = "magnifyingglass", .tooltip = "SamSearch" });
     // The menu bar icon, unless Settings took it away.
     if (kv.get(init.gpa, menu_bar_key) catch null) |v| {
         defer init.gpa.free(v);
@@ -566,13 +568,15 @@ pub fn main(init: std.process.Init) !void {
     }
     // A release build checks its GitHub releases; one run from zig-out
     // can't replace itself, and leaves the item off.
-    const updater = nanoui.Updater.start(init, .{
-        .repo = "justrach/nanolight",
+    // A shared nanoui development feed could belong to another launcher.
+    // Disable updates under that override rather than inherit its artifacts.
+    const updater = if (init.environ_map.get("NANOUI_UPDATE_FEED") == null) nanoui.Updater.start(init, .{
+        .repo = "Samin12/samsearch",
         .asset = asset,
         .version = version,
-        .name = "Nanolight",
+        .name = "SamSearch",
         .changed = .{ .ctx = &live, .func = Live.updated },
-    }) catch null;
+    }) catch null else null;
     defer if (updater) |u| u.deinit();
     if (updater) |u| if (u.phase.load(.acquire) != .off) {
         live.updater = u;

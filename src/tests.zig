@@ -10,6 +10,7 @@ test {
     _ = @import("search.zig");
     _ = @import("calc.zig");
     _ = @import("results.zig");
+    _ = @import("data_dir.zig");
     _ = @import("suggest.zig");
     _ = @import("promo_camera.zig");
     _ = @import("settings.zig");
@@ -88,7 +89,7 @@ test "the panel finds, moves, answers and hands off" {
     try std.testing.expect(t.hasText("Suggestions"));
     try std.testing.expect(t.hasText("Safari"));
     // After an automatic update, the footer says so in place of the name.
-    try std.testing.expect(t.hasText("Nanolight · 5 apps"));
+    try std.testing.expect(t.hasText("SamSearch · 5 apps"));
     s.note = "Updated to 0.1.3";
     t.settle(1);
     try std.testing.expect(t.hasText("Updated to 0.1.3 · 5 apps"));
@@ -127,13 +128,13 @@ test "the panel finds, moves, answers and hands off" {
     press(&t, &.{.{ .command = .insert_newline }});
     try std.testing.expectEqualStrings("3072", t.clipboard.items);
 
-    // Anything else: Google, Grok, X.
+    // Anything else: Google, Quick Ask, T3, DigUp.
     press(&t, &.{ .{ .command = .select_all }, .{ .command = .delete_backward }, .{ .insert = "liquid glass" } });
-    try std.testing.expect(t.containsText("Search X for"));
+    try std.testing.expect(t.containsText("Search DigUp for"));
     _ = t.shortcut(.{ .key = ui.Shortcut.down });
     _ = t.shortcut(.{ .key = ui.Shortcut.down });
     press(&t, &.{.{ .command = .insert_newline }});
-    try std.testing.expectEqualStrings("https://x.com/search?f=live&q=liquid+glass", probe.opened[0..probe.opened_len]);
+    try std.testing.expectEqualStrings("quickask://t3-thread-create?q=liquid+glass", probe.opened[0..probe.opened_len]);
 
     // Escape clears the query, then closes.
     probe.hidden = false;
@@ -208,7 +209,8 @@ test "Google's completions land below, and a search shows in the panel" {
     try std.testing.expectEqual(results.Kind.search_web, s.res.rows[s.sel].kind);
     _ = t.shortcut(.{ .key = ui.Shortcut.down });
     _ = t.shortcut(.{ .key = ui.Shortcut.down });
-    try std.testing.expectEqual(results.Kind.search_x, s.res.rows[s.sel].kind);
+    _ = t.shortcut(.{ .key = ui.Shortcut.down });
+    try std.testing.expectEqual(results.Kind.digup, s.res.rows[s.sel].kind);
     var said: suggest.List = .{};
     for ([_][]const u8{ "liquid glass", "liquid glass apple" }) |w| said.push(w);
     s.answered("liquid gl", &said);
@@ -216,7 +218,7 @@ test "Google's completions land below, and a search shows in the panel" {
     try std.testing.expect(t.hasText("Google"));
     try std.testing.expect(t.hasText("liquid glass apple"));
     try std.testing.expectEqual(results.Kind.suggest, s.res.rows[1].kind);
-    try std.testing.expectEqual(results.Kind.search_x, s.res.rows[s.sel].kind);
+    try std.testing.expectEqual(results.Kind.digup, s.res.rows[s.sel].kind);
     // The first completion shows faintly in the field; Tab takes it.
     try std.testing.expect(t.hasText("ass"));
     try std.testing.expect(t.shortcut(.{ .key = ui.Shortcut.tab }));
@@ -315,7 +317,7 @@ test "the welcome: a key, pressed for real, then a first search" {
     try t.init(gpa, .init(&s, view.Nanolight.view), .{ .width = view.width, .height = 480, .dark = true });
     defer t.deinit();
     t.settle(1);
-    try std.testing.expect(t.hasText("Welcome to Nanolight"));
+    try std.testing.expect(t.hasText("Welcome to SamSearch"));
     // Who holds ⌘Space, by name; going on anyway is said as such.
     try std.testing.expect(t.hasText("macOS gives ⌘ Space to Spotlight first."));
     try std.testing.expect(t.hasText("Use ⌘ Space anyway"));
@@ -457,7 +459,7 @@ test "settings opens from ⌘,, from typing, and from the gear" {
     try t.clickText("Settings");
     t.settle(1);
     try std.testing.expect(s.settings_ui.open);
-    try std.testing.expect(t.hasText("Open Nanolight with"));
+    try std.testing.expect(t.hasText("Open SamSearch with"));
     _ = t.shortcut(.{ .key = ui.Shortcut.escape });
     try std.testing.expect(!s.settings_ui.open);
 
@@ -477,7 +479,7 @@ test "settings opens from ⌘,, from typing, and from the gear" {
 
     // Typing "settings" lists the row; Return opens it.
     press(&t, &.{.{ .insert = "settings" }});
-    try std.testing.expect(t.hasText("Nanolight Settings"));
+    try std.testing.expect(t.hasText("SamSearch Settings"));
     try std.testing.expectEqual(results.Kind.settings, s.res.rows[0].kind);
     press(&t, &.{.{ .command = .insert_newline }});
     t.settle(1);
@@ -523,6 +525,8 @@ test "settings opens from ⌘,, from typing, and from the gear" {
 }
 
 test "the panel never outgrows its window, which is never resized" {
+    // Preserve the original twelve-row panel budget when adding handoffs.
+    try std.testing.expectEqual(@as(f32, 674), view.max_height);
     const gpa = std.testing.allocator;
     var ix: Index = .init(gpa);
     defer ix.deinit();

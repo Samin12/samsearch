@@ -30,7 +30,7 @@ const Windows = struct {
     const L = std.unicode.utf8ToUtf16LeStringLiteral;
     const hkcu: *anyopaque = @ptrFromInt(0x80000001);
     const run_key = L("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
-    const value = L("Nanolight");
+    const value = L("SamSearch");
     const reg_sz: u32 = 1;
     const rrf_rt_reg_sz: u32 = 2;
     extern "advapi32" fn RegSetKeyValueW(key: *anyopaque, sub: [*:0]const u16, name: [*:0]const u16, kind: u32, data: ?*const anyopaque, size: u32) callconv(.winapi) i32;
@@ -76,7 +76,7 @@ const Linux = struct {
                 const n = std.c.readlink("/proc/self/exe", &exe, exe.len);
                 if (n <= 0) return false;
                 var entry: [2048]u8 = undefined;
-                const text = std.fmt.bufPrint(&entry, "[Desktop Entry]\nType=Application\nName=Nanolight\nComment=A launcher, on Alt Space\nExec=\"{s}\"\nIcon=nanolight\nX-GNOME-Autostart-enabled=true\nNoDisplay=true\n", .{exe[0..@intCast(n)]}) catch return false;
+                const text = std.fmt.bufPrint(&entry, "[Desktop Entry]\nType=Application\nName=SamSearch\nComment=A launcher, on Alt Space\nExec=\"{s}\"\nIcon=nanolight\nX-GNOME-Autostart-enabled=true\nNoDisplay=true\n", .{exe[0..@intCast(n)]}) catch return false;
                 if (std.fs.path.dirname(path)) |dir| cwd.createDirPath(io(), dir) catch {};
                 cwd.writeFile(io(), .{ .sub_path = path, .data = text }) catch return false;
             } else cwd.deleteFile(io(), path) catch {};

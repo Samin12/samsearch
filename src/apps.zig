@@ -46,7 +46,7 @@ pub fn scanSystem(ix: *Index, io: std.Io, env: *const std.process.Environ.Map) v
 /// An address for the browser or the system (a pane of System Settings),
 /// not a file to open.
 pub fn isUrl(target: []const u8) bool {
-    for ([_][]const u8{ "https://", "http://", @import("settings_panes.zig").url_prefix }) |p| if (std.mem.startsWith(u8, target, p)) return true;
+    for ([_][]const u8{ "https://", "http://", "quickask://", @import("settings_panes.zig").url_prefix }) |p| if (std.mem.startsWith(u8, target, p)) return true;
     return false;
 }
 
@@ -409,4 +409,11 @@ test "launch counts follow the app path when the display name changes" {
     ix.launches.items[i] = 0;
     ix.load(mem.store());
     try t.expectEqual(@as(u16, 2), ix.launches.items[i]);
+}
+
+test "helper links are URLs rather than app paths" {
+    const t = std.testing;
+    for ([_][]const u8{ "quickask://answer?q=hello+world", "quickask://t3-thread-create?q=hello", "http://127.0.0.1:47213/digup?q=hello", "https://google.com", "x-apple.systempreferences:com.apple.Keyboard-Settings.extension" }) |u| try t.expect(isUrl(u));
+    try t.expect(!isUrl("/Applications/QuickAsk.app"));
+    try t.expect(!isUrl("quickask-not-a-url"));
 }

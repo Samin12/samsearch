@@ -18,7 +18,7 @@ const Settings = settings.Settings;
 
 pub const gateway = "https://gateway.codegraff.com";
 pub const terms_url = "https://codegraff.com/terms";
-const service = "dev.nanoui.nanolight";
+const service = "dev.samin.samsearch";
 const key_account = "codegraff";
 const email_key = "nanolight.account.email";
 /// Set once this Mac has synced: from then on its own later choices win.

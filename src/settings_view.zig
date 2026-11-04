@@ -102,7 +102,7 @@ pub const Settings = struct {
     fn body(s: *Settings, c: *ui.Context, n: *panel.Nanolight, p: Palette, rows: []const RowKind) void {
         const col = ui.div(c).column().wFull().px(20).pt(2).pb(6).gap(if (mac) 8 else 10).grow();
         defer col.end();
-        label(c, p, "Open Nanolight with");
+        label(c, p, "Open SamSearch with");
         s.choices(c, n, p);
         label(c, p, "Search");
         s.switchRow(c, n, p, rows, .suggest, "Google Suggestions");
@@ -116,7 +116,7 @@ pub const Settings = struct {
         label(c, p, "Updates");
         s.updates(c, n, p, rows);
         s.button(c, n, p, rows, .welcome, "Show Welcome Again");
-        s.button(c, n, p, rows, .quit, "Quit Nanolight");
+        s.button(c, n, p, rows, .quit, "Quit SamSearch");
     }
 
     fn label(c: *ui.Context, p: Palette, name: []const u8) void {
@@ -269,7 +269,7 @@ pub const Settings = struct {
     }
 
     fn updates(s: *Settings, c: *ui.Context, n: *panel.Nanolight, p: Palette, rows: []const RowKind) void {
-        ui.textf(c, .{ .size = 12.5, .color = p.sub }, "Nanolight {s}", .{s.version});
+        ui.textf(c, .{ .size = 12.5, .color = p.sub }, "SamSearch {s}", .{s.version});
         const text = if (s.ready) |v| c.print("Restart to Update to {s}", .{v}) else "Check for Updates";
         s.button(c, n, p, rows, .updates, text);
     }

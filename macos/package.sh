@@ -1,5 +1,5 @@
 #!/bin/sh
-# Builds Nanolight.app and nanolight-macos-arm64.dmg in zig-out/package, and
+# Builds SamSearch.app and nanolight-macos-arm64.dmg in zig-out/package, and
 # the update the app's updater reads from the release:
 # nanolight-macos-arm64.zip and manifest.json (its version and the zip's
 # sha256).
@@ -19,7 +19,7 @@ cd "$(dirname "$0")/.."
 version="${VERSION:-$(git describe --tags --always 2>/dev/null || echo 0.0.0)}"
 version="${version#v}"
 out=zig-out/package
-bundle="$out/Nanolight.app"
+bundle="$out/SamSearch.app"
 dmg="$out/nanolight-macos-arm64.dmg"
 zip="$out/nanolight-macos-arm64.zip"
 
@@ -27,15 +27,15 @@ zip="$out/nanolight-macos-arm64.zip"
 # the macOS and the CPU it was built on.
 min_macos=14.0
 zig build app -Doptimize=ReleaseSafe -Dtarget=aarch64-macos.$min_macos -Dcpu=apple_m1 -Dversion="$version" ${ZIG_FLAGS:-}
-if ! vtool -show-build zig-out/Nanolight.app/Contents/MacOS/nanolight | grep -q "minos $min_macos\$"; then
-  echo "Nanolight is not built for macOS $min_macos:" >&2
-  vtool -show-build zig-out/Nanolight.app/Contents/MacOS/nanolight >&2
+if ! vtool -show-build zig-out/SamSearch.app/Contents/MacOS/nanolight | grep -q "minos $min_macos\$"; then
+  echo "SamSearch is not built for macOS $min_macos:" >&2
+  vtool -show-build zig-out/SamSearch.app/Contents/MacOS/nanolight >&2
   exit 1
 fi
 rm -rf "$out"
 mkdir -p "$out"
 # zig-out's copy is read-only (the build cache's files): a writable one.
-ditto zig-out/Nanolight.app "$bundle"
+ditto zig-out/SamSearch.app "$bundle"
 chmod -R u+w "$bundle"
 
 sign() {
@@ -72,10 +72,10 @@ staple() {
 
 sign "$bundle"
 if notarizing; then
-  ditto -c -k --keepParent "$bundle" "$out/Nanolight.zip"
-  notarize "$out/Nanolight.zip"
+  ditto -c -k --keepParent "$bundle" "$out/SamSearch.zip"
+  notarize "$out/SamSearch.zip"
   staple "$bundle"
-  rm "$out/Nanolight.zip"
+  rm "$out/SamSearch.zip"
 fi
 
 # The disk image: the app, and Applications to drag it to.
@@ -83,7 +83,7 @@ stage="$out/dmg"
 mkdir -p "$stage"
 cp -R "$bundle" "$stage/"
 ln -s /Applications "$stage/Applications"
-hdiutil create -quiet -volname Nanolight -srcfolder "$stage" -fs HFS+ -format UDZO -ov "$dmg"
+hdiutil create -quiet -volname SamSearch -srcfolder "$stage" -fs HFS+ -format UDZO -ov "$dmg"
 rm -rf "$stage"
 sign "$dmg"
 if notarizing; then

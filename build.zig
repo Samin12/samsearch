@@ -1,9 +1,9 @@
-//! Nanolight: a launcher for the Mac (⌘Space), Windows and Linux (Alt
+//! SamSearch: a launcher for the Mac (⌘Space), Windows and Linux (Alt
 //! Space), drawn by nanoui. Any target builds from any machine
 //! (`-Dtarget=x86_64-windows-gnu`, `-Dtarget=x86_64-linux-gnu`).
 //!
 //!   zig build run            build and open it
-//!   zig build app            zig-out/Nanolight.app, for /Applications
+//!   zig build app            zig-out/SamSearch.app, for /Applications
 //!   zig build test           its search, math, suggestions and panel
 //!   zig build film           the walkthrough's renderer (tools/film.sh)
 //!   zig build promo          the promo's renderer (tools/promo.sh)
@@ -17,7 +17,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const os = target.result.os.tag;
     const nanoui = b.dependency("nanoui", .{ .target = target, .optimize = optimize }).module("nanoui");
-    const version = b.option([]const u8, "version", "Nanolight's version, as the app shows it (release builds)") orelse "0.1.0";
+    const version = b.option([]const u8, "version", "SamSearch's version, as the app shows it (release builds)") orelse "0.1.0";
     // The version, for `--version` and the updater off the Mac (no bundle there).
     const opts = b.addOptions();
     opts.addOption([]const u8, "version", version);
@@ -55,13 +55,13 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(exe);
     const run = b.addRunArtifact(exe);
     run.addPassthruArgs();
-    b.step("run", "Run Nanolight (⌘Space)").dependOn(&run.step);
+    b.step("run", "Run SamSearch (⌘Space)").dependOn(&run.step);
 
-    // zig-out/Nanolight.app: the program with its icon, for /Applications.
+    // zig-out/SamSearch.app: the program with its icon, for /Applications.
     if (os == .macos) {
-        const app = b.addInstallDirectory(.{ .source_dir = bundle(b, exe, version), .install_dir = .prefix, .install_subdir = "Nanolight.app" });
+        const app = b.addInstallDirectory(.{ .source_dir = bundle(b, exe, version), .install_dir = .prefix, .install_subdir = "SamSearch.app" });
         b.getInstallStep().dependOn(&app.step);
-        b.step("app", "Build zig-out/Nanolight.app").dependOn(&app.step);
+        b.step("app", "Build zig-out/SamSearch.app").dependOn(&app.step);
     }
 
     const tests = b.addTest(.{ .root_module = b.createModule(.{
@@ -75,7 +75,7 @@ pub fn build(b: *std.Build) void {
     if (os == .windows) for ([_][]const u8{ "user32", "gdi32", "shell32", "advapi32", "dwmapi", "ole32" }) |lib| tests.root_module.linkSystemLibrary(lib, .{});
     // zig-out/bin/nanolight-tests: the tests, to run on another machine.
     b.step("test-bin", "Install the tests as zig-out/bin/nanolight-tests").dependOn(&b.addInstallArtifact(tests, .{ .dest_sub_path = if (os == .windows) "nanolight-tests.exe" else "nanolight-tests" }).step);
-    b.step("test", "Test Nanolight's search, math, suggestions and panel").dependOn(&b.addRunArtifact(tests).step);
+    b.step("test", "Test SamSearch's search, math, suggestions and panel").dependOn(&b.addRunArtifact(tests).step);
 
     // The walkthrough, rendered offscreen (src/film.zig, tools/film.sh).
     const film = b.addExecutable(.{ .name = "nanolight-film", .root_module = b.createModule(.{
@@ -96,7 +96,7 @@ pub fn build(b: *std.Build) void {
     b.step("promo", "Build the promo's renderer (zig-out/bin/nanolight-promo)").dependOn(&b.addInstallArtifact(promo, .{}).step);
 }
 
-/// Nanolight as a Mac app: its program, its icon, and an Info.plist that
+/// SamSearch as a Mac app: its program, its icon, and an Info.plist that
 /// keeps it out of the Dock (a menu bar app).
 fn bundle(b: *std.Build, exe: *std.Build.Step.Compile, version: []const u8) std.Build.LazyPath {
     const wf = b.addWriteFiles();
@@ -106,7 +106,7 @@ fn bundle(b: *std.Build, exe: *std.Build.Step.Compile, version: []const u8) std.
     return wf.getDirectory();
 }
 
-/// The bundle's Info.plist (macos/package.sh writes the same one).
+/// The bundle's Info.plist (macos/package.sh packages this same bundle).
 pub fn infoPlist(b: *std.Build, version: []const u8) []const u8 {
     return b.fmt(
         \\<?xml version="1.0" encoding="UTF-8"?>
@@ -114,9 +114,9 @@ pub fn infoPlist(b: *std.Build, version: []const u8) []const u8 {
         \\<plist version="1.0">
         \\<dict>
         \\  <key>CFBundleExecutable</key><string>nanolight</string>
-        \\  <key>CFBundleIdentifier</key><string>dev.nanoui.nanolight</string>
-        \\  <key>CFBundleName</key><string>Nanolight</string>
-        \\  <key>CFBundleDisplayName</key><string>Nanolight</string>
+        \\  <key>CFBundleIdentifier</key><string>dev.samin.samsearch</string>
+        \\  <key>CFBundleName</key><string>SamSearch</string>
+        \\  <key>CFBundleDisplayName</key><string>SamSearch</string>
         \\  <key>CFBundleIconFile</key><string>AppIcon</string>
         \\  <key>CFBundlePackageType</key><string>APPL</string>
         \\  <key>CFBundleShortVersionString</key><string>{s}</string>
@@ -126,6 +126,8 @@ pub fn infoPlist(b: *std.Build, version: []const u8) []const u8 {
         \\  <key>LSUIElement</key><true/>
         \\  <key>NSPrincipalClass</key><string>NSApplication</string>
         \\  <key>NSHighResolutionCapable</key><true/>
+        \\  <key>NSAppTransportSecurity</key>
+        \\  <dict><key>NSAllowsLocalNetworking</key><true/></dict>
         \\  <key>NSDesktopFolderUsageDescription</key><string>File Search lists the files and folders in a folder you type.</string>
         \\  <key>NSDocumentsFolderUsageDescription</key><string>File Search lists the files and folders in a folder you type.</string>
         \\  <key>NSDownloadsFolderUsageDescription</key><string>File Search lists the files and folders in a folder you type.</string>

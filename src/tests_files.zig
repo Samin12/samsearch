@@ -46,8 +46,8 @@ test "files and extra section heads fit the original window" {
             try std.testing.expectEqual(@as(usize, if (std.mem.eql(u8, q, "settings")) 1 else 6), apps);
             try std.testing.expectEqual(@as(usize, 1), file_heads);
             if (exact) try std.testing.expectEqual(results.Kind.file, s.res.rows[0].kind);
-            try std.testing.expectEqual(results.Kind.ask_grok, s.res.rows[s.res.n - 2].kind);
-            try std.testing.expectEqual(results.Kind.search_x, s.res.rows[s.res.n - 1].kind);
+            try std.testing.expectEqual(results.Kind.quick_ask, s.res.rows[s.res.n - 3].kind);
+            try std.testing.expectEqual(results.Kind.digup, s.res.rows[s.res.n - 1].kind);
             var google: usize = 0;
             for (s.res.slice()) |row| {
                 if (row.kind == .search_web) google += 1;
@@ -173,7 +173,7 @@ test "apps, panes, files, Google and Ask & Search share the window budget" {
             .pane => panes = true,
             .file => files = true,
             .search_web => google = true,
-            .ask_grok => ask = true,
+            .quick_ask => ask = true,
             else => {},
         }
     }

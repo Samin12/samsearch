@@ -38,7 +38,7 @@ fn io() std.Io {
 
 /// `<data dir>/extensions`, made if missing. Caller frees it.
 pub fn dir(gpa: std.mem.Allocator) ![]u8 {
-    const data = try nanoui.path(gpa, .data, "Nanolight");
+    const data = try @import("data_dir.zig").prepare(gpa, io());
     defer gpa.free(data);
     const d = try std.fs.path.join(gpa, &.{ data, "extensions" });
     std.Io.Dir.cwd().createDirPath(io(), d) catch {};
@@ -148,7 +148,7 @@ const host_js = @embedFile("raycast_host");
 /// update never runs an older one).
 pub fn findHost(gpa: std.mem.Allocator, env: *const std.process.Environ.Map) ?[]u8 {
     if (env.get("NANOLIGHT_RAYCAST_HOST")) |p| return gpa.dupe(u8, p) catch null;
-    const cache = nanoui.path(gpa, .cache, "Nanolight") catch return null;
+    const cache = nanoui.path(gpa, .cache, "SamSearch") catch return null;
     defer gpa.free(cache);
     var name: [48]u8 = undefined;
     const file = std.fmt.bufPrint(&name, "raycast-host-{x}.js", .{std.hash.Wyhash.hash(0, host_js)}) catch return null;
@@ -181,7 +181,7 @@ pub const Runner = struct {
     pub fn start(r: *Runner, path: []const u8, title: []const u8, ext_icon: ?[]const u8) void {
         r.stop();
         const node = r.node orelse return r.fail(title, "Raycast extensions need Node.js: install it from nodejs.org.");
-        const host = r.host orelse return r.fail(title, "The Raycast host couldn't be written to Nanolight's cache.");
+        const host = r.host orelse return r.fail(title, "The Raycast host couldn't be written to SamSearch's cache.");
         var argv_buf: [6][]const u8 = undefined;
         const root = dir(r.gpa) catch return;
         defer r.gpa.free(root);
@@ -324,8 +324,8 @@ pub const Runner = struct {
 };
 
 test "a command's row path splits into its directory and name" {
-    const s = split("raycast:/home/me/.local/share/Nanolight/extensions/hacker-news#frontpage").?;
-    try std.testing.expectEqualStrings("/home/me/.local/share/Nanolight/extensions/hacker-news", s.dir);
+    const s = split("raycast:/home/me/.local/share/SamSearch/extensions/hacker-news#frontpage").?;
+    try std.testing.expectEqualStrings("/home/me/.local/share/SamSearch/extensions/hacker-news", s.dir);
     try std.testing.expectEqualStrings("frontpage", s.cmd);
     try std.testing.expect(split("/Applications/Safari.app") == null);
 }

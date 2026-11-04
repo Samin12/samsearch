@@ -33,7 +33,7 @@ pub const wm_hotkey: u32 = 0x0312;
 pub const wm_toggle: u32 = 0x8001;
 pub const wm_quit: u32 = 0x8002;
 
-const class_name = std.unicode.utf8ToUtf16LeStringLiteral("NanolightMessages");
+const class_name = std.unicode.utf8ToUtf16LeStringLiteral("SamSearchMessages");
 /// HWND_MESSAGE: the parent of message-only windows.
 const message_parent: HWND = @ptrFromInt(@as(usize, @bitCast(@as(isize, -3))));
 

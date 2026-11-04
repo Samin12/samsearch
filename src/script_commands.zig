@@ -88,7 +88,7 @@ fn io() std.Io {
 
 /// `<data dir>/script-commands`, made if missing. Caller frees it.
 pub fn dir(gpa: std.mem.Allocator) ![]u8 {
-    const data = try nanoui.path(gpa, .data, "Nanolight");
+    const data = try @import("data_dir.zig").prepare(gpa, io());
     defer gpa.free(data);
     const d = try std.fs.path.join(gpa, &.{ data, "script-commands" });
     std.Io.Dir.cwd().createDirPath(io(), d) catch {};
