@@ -131,30 +131,41 @@ pub const Results = struct {
         var ranked: [max_apps]search.Ranked = undefined;
         const n = search.rankApps(query, ix, boost, &ranked);
         const settings = isSettings(query);
-        // Math keeps upstream's answer and matching apps, without handoffs.
+        // Math keeps its answer and the matching apps, without handoffs.
         if (r.n > 0 and r.rows[0].kind == .calc) {
             for (ranked[0..n]) |x| r.push(.{ .kind = .app, .app = x.index, .match = x.match });
             return;
         }
         var pane_rows: [max_panes]search.Ranked = undefined;
         const np = if (settings) 0 else panes.rank(query, &pane_rows);
-        // One row pays for each section head beyond the original three.
+        // One row pays for each section head beyond the original three, so
+        // the panel never grows past its tallest (view.max_height).
         const heads: usize = 2 + @as(usize, @intFromBool(n > 0)) + @as(usize, @intFromBool(np > 0)) +
             @as(usize, @intFromBool(settings)) + @as(usize, @intFromBool(found.n > 0));
         const limit = max_rows -| (heads -| 3);
+        const fixed = handoffs + @as(usize, @intFromBool(settings));
+        const first_pane: usize = @intFromBool(np > 0);
         const file_row: usize = @intFromBool(found.n > 0);
-        const app_count = @min(n, limit -| @intFromBool(settings) -| np -| handoffs -| file_row);
-        const count = @min(found.n, limit -| app_count -| @intFromBool(settings) -| np -| handoffs);
+        // Apps come first. Panes and files are sure of a row each and take
+        // only what is left: a full list of apps ("hola") leaves room for
+        // two panes, not three.
+        const app_count = @min(n, limit -| fixed -| first_pane -| file_row);
+        const pane_count = @min(np, limit -| fixed -| file_row -| app_count);
+        const count = @min(found.n, limit -| fixed -| app_count -| pane_count);
         // An exact path leads, with its siblings under one Files head.
         if (found.exact) for (0..count) |i| {
             r.push(.{ .kind = .file, .file = @intCast(i), .match = found.entries[i].match });
         };
         for (ranked[0..app_count]) |x| r.push(.{ .kind = .app, .app = x.index, .match = x.match });
+        // "settings" / "preferences": Nanolight's own screen, right under
+        // the apps: Return still opens System Settings, a key away from this.
         if (settings) r.push(.{ .kind = .settings });
-        for (pane_rows[0..np]) |x| r.push(.{ .kind = .pane, .app = x.index, .match = x.match });
+        for (pane_rows[0..pane_count]) |x| r.push(.{ .kind = .pane, .app = x.index, .match = x.match });
         if (!found.exact) for (0..count) |i| {
             r.push(.{ .kind = .file, .file = @intCast(i), .match = found.entries[i].match });
         };
+        // The search for what was typed, its completions (as many as leave
+        // room for the rest), then Grok and X.
         const room = limit -| r.n -| handoffs;
         r.push(.{ .kind = .search_web });
         for (0..@min(web.len, max_web, room)) |i| r.push(.{ .kind = .suggest, .web = @intCast(i) });
@@ -296,4 +307,47 @@ test "System Settings' panes come under the apps and keep the panel's height (#1
     // Math lists no panes.
     r.build("2+2", &ix, &.{}, &.{}, &.{});
     try t.expectEqual(@as(usize, 1), r.n);
+}
+
+test "a full list of apps and three panes still fits, with every handoff" {
+    if (!mac) return error.SkipZigTest;
+    const t = std.testing;
+    // Six apps match "ho", and so do three panes (Desktop & Dock, Sound,
+    // Keyboard): typing "hola" used to overflow the room left for Google.
+    var ix = try testIndex(t.allocator, &.{ "Home", "Hopper", "Hotspot Shield", "Photos", "Shortcuts", "Photo Booth", "Phone" });
+    defer ix.deinit();
+    var r: Results = .{};
+    const web = [_][]const u8{ "hola", "hotmail", "hoy", "horoscopo" };
+    r.build("ho", &ix, &.{}, &web, &.{});
+    var apps_n: usize = 0;
+    var panes_n: usize = 0;
+    for (r.slice()) |row| switch (row.kind) {
+        .app => apps_n += 1,
+        .pane => panes_n += 1,
+        else => {},
+    };
+    try t.expectEqual(@as(usize, max_apps), apps_n);
+    // The header costs a row: two panes, not three.
+    try t.expect(panes_n <= max_panes - 1);
+    try t.expect(r.n <= max_rows - @as(usize, @intFromBool(panes_n > 0)));
+    try t.expectEqual(Kind.search_web, r.rows[r.n - 3].kind);
+    try t.expectEqual(Kind.ask_grok, r.rows[r.n - 2].kind);
+    try t.expectEqual(Kind.search_x, r.rows[r.n - 1].kind);
+    // With files too there are five heads: every section keeps a row, and
+    // the apps keep the rest.
+    var found: files.List = .{ .allocator = t.allocator };
+    defer found.deinit();
+    for (0..files.max_rows) |i| {
+        var path: [64]u8 = undefined;
+        found.add(try std.fmt.bufPrint(&path, "/tmp/ho{d}", .{i}), false, .{ .score = 1 });
+    }
+    r.build("ho", &ix, &.{}, &web, &found);
+    var counts = std.enums.EnumArray(Kind, usize).initFill(0);
+    for (r.slice()) |row| counts.set(row.kind, counts.get(row.kind) + 1);
+    try t.expectEqual(@as(usize, max_apps - 1), counts.get(.app));
+    try t.expectEqual(@as(usize, 1), counts.get(.pane));
+    try t.expectEqual(@as(usize, 1), counts.get(.file));
+    try t.expectEqual(@as(usize, max_rows - 2), r.n);
+    try t.expectEqual(Kind.search_web, r.rows[r.n - 3].kind);
+    try t.expectEqual(Kind.search_x, r.rows[r.n - 1].kind);
 }
