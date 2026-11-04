@@ -1,0 +1,84 @@
+{
+  "$schema": "https://www.raycast.com/schemas/extension.json",
+  "name": "samin-quick-ask",
+  "title": "Quick Ask",
+  "description": "Ask a fast model about what's on screen, or hand the task to a new T3 Code thread.",
+  "icon": "icon.png",
+  "author": "samin12",
+  "license": "MIT",
+  "platforms": ["macOS"],
+  "categories": ["Productivity", "Developer Tools"],
+  "commands": [
+    {
+      "name": "ask",
+      "title": "Quick Ask",
+      "subtitle": "Haiku · sees your screen",
+      "description": "Type a question or a task. Enter answers right here, or opens a new T3 Code thread when it's real work. Command-Enter always answers here; Command-Shift-Enter always opens a T3 thread.",
+      "keywords": ["ai", "ask", "haiku", "claude", "screen", "t3", "chat"],
+      "mode": "view"
+    },
+    {
+      "name": "new-thread",
+      "title": "New T3 Thread",
+      "subtitle": "T3 Code · default settings",
+      "description": "Start a new T3 Code thread with your message in the default project and model, then jump to it.",
+      "keywords": ["t3", "thread", "agent", "claude code", "task"],
+      "mode": "view"
+    }
+  ],
+  "preferences": [
+    {
+      "name": "model",
+      "title": "Fast Model",
+      "description": "Model used for quick answers, through CLIProxyAPI.",
+      "type": "dropdown",
+      "required": false,
+      "default": "claude-haiku-5-5",
+      "data": [
+        { "title": "Claude Haiku 5.5 (fastest)", "value": "claude-haiku-5-5" },
+        { "title": "Claude Sonnet 5.5", "value": "claude-sonnet-5-5" },
+        { "title": "Claude Opus 5.5", "value": "claude-opus-5-5" }
+      ]
+    },
+    {
+      "name": "useScreen",
+      "title": "Screen",
+      "label": "Let Quick Ask see the window behind the launcher",
+      "description": "Takes a screenshot of the front window when you open Quick Ask. Needs Screen Recording permission for Nanolight.",
+      "type": "checkbox",
+      "required": false,
+      "default": true
+    },
+    {
+      "name": "projects",
+      "title": "T3 Projects",
+      "description": "Project folders for new T3 threads, separated by commas. The first one is the default.",
+      "type": "textfield",
+      "required": false,
+      "default": "~/SaminOS"
+    },
+    {
+      "name": "proxyUrl",
+      "title": "CLIProxyAPI URL",
+      "type": "textfield",
+      "required": false,
+      "default": "http://127.0.0.1:8317"
+    },
+    {
+      "name": "apiKey",
+      "title": "CLIProxyAPI Key",
+      "description": "Leave empty to read CPA_API_KEY from ~/.cli-proxy-api/keys.env.",
+      "type": "password",
+      "required": false
+    }
+  ],
+  "scripts": {
+    "build": "./build.sh"
+  },
+  "devDependencies": {
+    "@raycast/api": "^1.100.0",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "typescript": "^5.6.0"
+  }
+}

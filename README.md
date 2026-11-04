@@ -8,6 +8,28 @@ Apps, math, Google, Quick Ask, T3, DigUp and Raycast extensions: one keystroke a
 
 <p align="center"><img src="docs/images/nanolight.jpg" alt="SamSearch's panel has found Safari from &quot;saf&quot;" width="760"></p>
 
+> SamSearch is Samin Yasar's fork of [justrach/nanolight](https://github.com/justrach/nanolight) (MIT), with a fast assistant, T3 Code and DigUp built in.
+
+## What SamSearch adds
+
+Type anything, then pick a row under **Ask & Search** (or press its ⌘ number):
+
+| Row | What happens |
+| --- | --- |
+| **Ask “…”** | Claude Haiku answers right in the panel. It sees the window you were in (a screenshot, plus the page's text from Chrome/Safari, like a Gmail thread, or text read off the screen), knows who you are (Honcho), and looks things up by itself: your GitHub repos, your memory, your files and email (DigUp) and your open Chrome tabs. Real work goes to a new T3 thread instead. Links come back numbered: ⌘1–⌘9 opens one in Chrome. |
+| **New T3 thread: “…”** | Starts a T3 Code thread in `~/SaminOS` with the default model and settings, then jumps to it. |
+| **Search DigUp for “…”** | DigUp's results in the panel, with thumbnails: ↵ opens, ⌘R shows in Finder. |
+
+These run through **Quick Ask** (`quickask/`), a small Swift helper: a local server on `127.0.0.1:47213` whose pages SamSearch shows in its panel, and the handler for `quickask://` links. It only answers its own host name, and its actions need a header other sites can't send.
+
+| Folder | What |
+| --- | --- |
+| `quickask/` | The helper: `main.swift` (server, screen context, Haiku + tools, DigUp, T3), `ask.html`, `digup.html`. `./build.sh` builds `~/Applications/Quick Ask.app`, signs it with your Apple Development certificate (so Screen Recording permission sticks) and starts it. |
+| `extensions/quick-ask/` | The same Quick Ask and New T3 Thread as Raycast-style extension commands, for Nanolight or SamSearch's extension list. |
+| `docs/reverse-engineering/` | How the closed 0.2.6 Nanolight binary was taken apart with REA and Rizin before the source turned up, and the binary patch used then. |
+
+Needs: [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) on `127.0.0.1:8317` (key from `~/.cli-proxy-api/keys.env`), T3 Code's `t3` CLI, DigUp, `gh`, and a Honcho key in `~/.honcho/config.json` (all optional except the first). Quick Ask needs **Screen Recording**, and asks to control Chrome the first time it reads a tab.
+
 ## What it does
 
 - **Finds apps as you type**: whole names, starts of words, initials (`ss` is System Settings), letters in order, and typos (`chorme` is Chrome). What you open often climbs.
@@ -37,7 +59,11 @@ Syncing goes through your Codegraff account, so [Codegraff's terms](https://code
 
 ## Install
 
-Build locally with `zig build app`. The bundle is `zig-out/SamSearch.app`; copy it to Applications when ready. Building does not launch it.
+```sh
+zig build app && cp -R zig-out/SamSearch.app /Applications/   # the launcher
+sh quickask/build.sh                                           # its helper
+```
+Quit Nanolight first if you used it: both want the same key. SamSearch copies Nanolight's Raycast extensions and script commands on its first run.
 
 On first run a short welcome picks the key that opens it and says who else holds it. On the Mac that's ⌘Space, ⌥Space, ⌃Space or ⌥⌘Space (any other, such as ⌥X, can be recorded later in Settings; Spotlight gives up ⌘Space in System Settings → Keyboard → Keyboard Shortcuts → Spotlight); on a PC, Alt Space, Ctrl Alt Space, Ctrl Space or Ctrl Shift Space. Updates use only `Samin12/samsearch` releases and the separate SamSearch cache. Missing releases or failed checks leave the installed app in place; updates are disabled if `NANOUI_UPDATE_FEED` is set.
 

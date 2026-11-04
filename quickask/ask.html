@@ -1,0 +1,213 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Quick Ask</title>
+<script src="/marked.min.js"></script>
+<style>
+  :root {
+    --fg: #f2f2f2; --muted: rgba(255,255,255,.55); --faint: rgba(255,255,255,.08);
+    --line: rgba(255,255,255,.1); --accent: #d97757; --code: rgba(255,255,255,.07);
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --fg: #1d1d1f; --muted: rgba(0,0,0,.5); --faint: rgba(0,0,0,.05); --line: rgba(0,0,0,.1); --code: rgba(0,0,0,.05); }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: transparent; color: var(--fg);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif; -webkit-font-smoothing: antialiased; }
+  body { display: flex; flex-direction: column; }
+  header { display: flex; align-items: center; gap: 8px; padding: 12px 16px 10px; border-bottom: 1px solid var(--line); -webkit-user-select: none; }
+  header .title { font-weight: 600; }
+  header .chip { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; }
+  header .model { color: var(--muted); font-size: 12px; }
+  .spark { color: var(--accent); }
+  main { flex: 1; overflow-y: auto; padding: 6px 18px 12px; }
+  .turn { padding: 10px 0; border-bottom: 1px solid var(--faint); }
+  .turn:last-child { border-bottom: 0; }
+  .q { font-weight: 600; margin-bottom: 4px; white-space: pre-wrap; }
+  .a p { margin: 6px 0; }
+  .a ul, .a ol { margin: 6px 0; padding-left: 22px; }
+  .a code { font: 12.5px ui-monospace, "SF Mono", monospace; background: var(--code); padding: 1px 5px; border-radius: 5px; }
+  .a pre { background: var(--code); padding: 10px 12px; border-radius: 8px; overflow-x: auto; }
+  .a pre code { background: none; padding: 0; }
+  .a a { color: var(--accent); }
+  .thinking { color: var(--muted); font-style: italic; }
+  .note { color: var(--muted); }
+  .note b { color: var(--fg); font-weight: 600; }
+  .err { color: #ff6b6b; }
+  .status { color: var(--muted); font-size: 12px; font-style: italic; margin-top: 4px; }
+  .links { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .links a { display: inline-flex; gap: 6px; align-items: center; max-width: 100%; padding: 3px 9px; border-radius: 7px;
+    background: var(--code); color: var(--fg); text-decoration: none; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .links a kbd { font: 11px -apple-system; color: var(--muted); }
+  .err code { display: block; margin-top: 4px; color: var(--muted); white-space: pre-wrap; }
+  footer { border-top: 1px solid var(--line); padding: 10px 16px 9px; }
+  input { width: 100%; border: 0; outline: 0; background: transparent; color: var(--fg); font: inherit; font-size: 15px; }
+  input::placeholder { color: var(--muted); }
+  .hints { margin-top: 6px; color: var(--muted); font-size: 11.5px; display: flex; flex-wrap: wrap; gap: 4px 14px; -webkit-user-select: none; }
+  .hints .flash { margin-left: auto; color: var(--accent); }
+</style>
+</head>
+<body>
+  <header>
+    <span class="spark">✦</span><span class="title">Quick Ask</span>
+    <span class="chip" id="chip">Looking at your screen…</span>
+    <span class="model">Haiku 5.5</span>
+  </header>
+  <main id="log"></main>
+  <footer>
+    <input id="inp" placeholder="Ask a follow-up…" autofocus>
+    <div class="hints">
+      <span>↵ ask</span><span>⌥↵ answer here</span><span id="t3hint">⌘↵ new T3 thread</span>
+      <span>⌘1–9 open link in Chrome</span><span>⌘T continue in T3</span><span>⇧⌘C copy</span><span>esc back</span>
+      <span class="flash" id="flash"></span>
+    </div>
+  </footer>
+<script>
+  /*BOOT*/
+  const B = window.BOOT || { q: new URLSearchParams(location.search).get("q") || "", sid: "", floating: false };
+  const log = document.getElementById("log"), inp = document.getElementById("inp");
+  const chip = document.getElementById("chip"), flashEl = document.getElementById("flash");
+  const history = [];
+  let busy = false, lastAnswer = "";
+  // In SamSearch's panel ⌘↩ belongs to the panel, so a T3 thread from the box is ⌘T there.
+  if (!B.floating) document.getElementById("t3hint").remove();
+
+  const api = (path, body) => fetch(path, { method: "POST", headers: { "X-QuickAsk": "1", "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const md = (t) => (window.marked ? marked.parse(t) : t.replace(/[&<]/g, (c) => ({ "&": "&amp;", "<": "&lt;" })[c]));
+  const scrollDown = () => (log.scrollTop = log.scrollHeight);
+  const flash = (t) => { flashEl.textContent = t; setTimeout(() => (flashEl.textContent = ""), 1400); };
+
+  function turn(q) {
+    const t = document.createElement("div");
+    t.className = "turn";
+    t.innerHTML = '<div class="q"></div><div class="a thinking">Thinking…</div><div class="status"></div><div class="links"></div>';
+    t.querySelector(".q").textContent = q;
+    log.appendChild(t);
+    scrollDown();
+    return t.querySelector(".a");
+  }
+
+  function note(el, html, text) {
+    el.className = "a note";
+    el.innerHTML = html;
+    if (text) el.querySelector("b").textContent = text;
+  }
+
+  async function ask(q, mode) {
+    if (!q || busy) return;
+    busy = true;
+    inp.placeholder = "Ask a follow-up…";
+    const el = turn(q);
+    const statusEl = el.parentElement.querySelector(".status");
+    const linksEl = el.parentElement.querySelector(".links");
+    let text = "";
+    try {
+      const res = await api("/api/ask", { sid: B.sid, q, mode, history });
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+      let buf = "", ended = false;
+      while (!ended) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let nl;
+        while ((nl = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
+          if (!line.trim()) continue;
+          const m = JSON.parse(line);
+          if (m.screen) {
+            const s = m.screen;
+            chip.textContent = s.ok ? `Sees ${s.app}${s.title && s.title !== s.app ? " — " + s.title : ""}${s.how ? " · " + s.how : ""}` : "Couldn't see the screen (Screen Recording permission)";
+          } else if (m.status) {
+            statusEl.textContent = m.status + "…";
+            text = "";
+            el.className = "a thinking";
+            el.textContent = "Thinking…";
+          } else if (m.d !== undefined) {
+            statusEl.textContent = "";
+            text += m.d;
+            el.className = "a";
+            el.innerHTML = md(text);
+            scrollDown();
+          } else if (m.done) {
+            history.push({ q, a: text });
+            lastAnswer = text;
+            showLinks(el, linksEl);
+            ended = true;
+          } else if (m.handoff) {
+            note(el, "This is real work, so it went to T3 Code.<br>Started a thread: <b></b> ✓", m.handoff);
+            ended = true;
+          } else if (m.error) {
+            el.className = "a err";
+            el.innerHTML = "Couldn't do that.<code></code>";
+            el.querySelector("code").textContent = m.error;
+            ended = true;
+          }
+        }
+      }
+    } catch (e) {
+      el.className = "a err";
+      el.innerHTML = "Couldn't reach Quick Ask.<code></code>";
+      el.querySelector("code").textContent = String(e);
+    }
+    busy = false;
+    inp.focus();
+  }
+
+  // The answer's web links, numbered: ⌘1–⌘9 (or a click) opens one in Chrome.
+  let links = [];
+  function showLinks(answerEl, box) {
+    const seen = new Set();
+    links = [...answerEl.querySelectorAll("a[href^='http']")].map((a) => a.href).filter((u) => !seen.has(u) && seen.add(u)).slice(0, 9);
+    box.innerHTML = links.map((u, i) => `<a href="${u.replace(/"/g, "&quot;")}"><kbd>⌘${i + 1}</kbd>${u.replace(/^https?:\/\//, "").replace(/</g, "&lt;")}</a>`).join("");
+  }
+  const openLink = (u) => api("/api/open-url", { url: u }).then(() => flash("Opened in Chrome"));
+  document.addEventListener("click", (e) => {
+    const a = e.target.closest("a[href]");
+    if (!a) return;
+    e.preventDefault();
+    if (/^https?:/.test(a.href)) openLink(a.href);
+  });
+
+  async function continueInT3() {
+    const last = history[history.length - 1];
+    if (!last) return flash("Nothing to continue yet");
+    const el = turn("Continue in T3 Code");
+    note(el, "Starting a thread: <b></b>", last.q);
+    const r = await (await api("/api/t3", { sid: B.sid, q: "Continue this for me: " + last.q, title: last.q, history })).json();
+    if (r.error) { el.className = "a err"; el.textContent = r.error; } else el.innerHTML += "<br>Started ✓";
+  }
+
+  document.addEventListener("keydown", (e) => {
+    const k = e.key.toLowerCase();
+    if (e.key === "Escape" && B.floating) {
+      e.preventDefault();
+      window.webkit?.messageHandlers?.qa?.postMessage({ type: "close" });
+    } else if (e.key === "Enter" && document.activeElement === inp) {
+      e.preventDefault();
+      const text = inp.value.trim();
+      if (!text) return;
+      inp.value = "";
+      ask(text, e.metaKey ? "t3" : e.altKey ? "answer" : "auto");
+    } else if (e.metaKey && !e.shiftKey && !e.altKey && /^[1-9]$/.test(e.key) && links[+e.key - 1]) {
+      e.preventDefault();
+      openLink(links[+e.key - 1]);
+    } else if (e.metaKey && !e.shiftKey && k === "o" && links[0]) {
+      e.preventDefault();
+      openLink(links[0]);
+    } else if (e.metaKey && !e.shiftKey && k === "t") {
+      e.preventDefault();
+      continueInT3();
+    } else if (e.metaKey && e.shiftKey && k === "c") {
+      e.preventDefault();
+      if (lastAnswer) api("/api/copy", { text: lastAnswer }).then(() => flash("Copied"));
+    }
+  });
+
+  if (B.q) ask(B.q, "auto");
+  else { inp.placeholder = "Ask anything…"; chip.textContent = "Ready"; }
+  inp.focus();
+</script>
+</body>
+</html>
