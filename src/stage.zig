@@ -40,7 +40,7 @@ pub const Stage = struct {
             const t = ui.div(c).absolute().offset(0, 190).w(width).column().itemsCenter().gap(10).motion(f);
             defer t.end();
             view.appIcon(c, 112);
-            ui.text(c, "Nanolight", .{ .size = 64, .weight = .bold, .color = .white, .tracking = -1 });
+            ui.text(c, "SamSearch", .{ .size = 64, .weight = .bold, .color = .white, .tracking = -1 });
             ui.text(c, "a launcher in Zig, drawn by nanoui", .{ .size = 22, .weight = .medium, .color = ui.Color.white.alpha(0.85) });
         }
         if (motion.present(c, c.print("panel-{d}", .{d.s.shown}), d.shown, .{
@@ -85,7 +85,7 @@ pub const Stage = struct {
                 .glass(.{ .tint = ui.Color.black.alpha(0.4) }).border(ui.Color.white.alpha(0.14)).motion(f);
             defer t.end();
             view.appIcon(c, 76);
-            ui.text(c, "Nanolight", .{ .size = 44, .weight = .bold, .color = .white, .tracking = -0.5 });
+            ui.text(c, "SamSearch", .{ .size = 44, .weight = .bold, .color = .white, .tracking = -0.5 });
             for (d.outro_lines, 0..) |line, i| {
                 ui.key(c, c.print("outro-{d}", .{i}));
                 const lf = motion.frame(c, .{ .initial = .{ .opacity = 0, .y = 8 }, .delay = 0.25 + motion.stagger(i, 0.18), .transition = .{ .spring = view.spring } });
@@ -97,7 +97,7 @@ pub const Stage = struct {
             ui.div(c).h(4).end();
             const k = ui.div(c).row().gap(10).itemsCenter();
             defer k.end();
-            ui.text(c, "github.com/justrach/nanolight", .{ .size = 14, .mono = true, .color = ui.Color.white.alpha(0.7) });
+            ui.text(c, "github.com/Samin12/samsearch", .{ .size = 14, .mono = true, .color = ui.Color.white.alpha(0.7) });
             ui.text(c, "·", .{ .size = 14, .color = ui.Color.white.alpha(0.5) });
             ui.text(c, "⌘Space", .{ .size = 14, .weight = .semibold, .color = ui.Color.white.alpha(0.85) });
         }
@@ -132,16 +132,16 @@ pub const Stage = struct {
         const t = ui.div(c).absolute().offset(64, 168).w(420).column().gap(14);
         defer t.end();
         view.appIcon(c, 96);
-        ui.text(c, "Nanolight", .{ .size = 66, .weight = .bold, .color = .white, .tracking = -1.2 });
-        ui.text(c, "Every app, math, Grok and X — one keystroke away.", .{ .size = 23, .weight = .medium, .color = ui.Color.white.alpha(0.88), .wrap = true, .line_height = 30 });
+        ui.text(c, "SamSearch", .{ .size = 66, .weight = .bold, .color = .white, .tracking = -1.2 });
+        ui.text(c, "Ask about your screen, start a T3 thread, find any file. One keystroke away.", .{ .size = 23, .weight = .medium, .color = ui.Color.white.alpha(0.88), .wrap = true, .line_height = 30 });
         const k = ui.div(c).row().gap(10).pt(8).itemsCenter();
         defer k.end();
         {
             const cap = ui.div(c).row().px(12).h(32).itemsCenter().rounded(9).glass(.{ .tint = ui.Color.black.alpha(0.35) }).border(ui.Color.white.alpha(0.22));
             defer cap.end();
-            ui.text(c, "⌘ Space", .{ .size = 15, .weight = .semibold, .color = .white });
+            ui.text(c, "⌃ Space", .{ .size = 15, .weight = .semibold, .color = .white });
         }
-        ui.text(c, "· written in Zig, drawn by nanoui", .{ .size = 15, .weight = .medium, .color = ui.Color.white.alpha(0.7) });
+        ui.text(c, "· Zig, Haiku, T3 Code, DigUp", .{ .size = 15, .weight = .medium, .color = ui.Color.white.alpha(0.7) });
     }
 
     pub fn pressed(d: *Stage, now: f64, key: []const u8) void {

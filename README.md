@@ -1,36 +1,126 @@
-<p align="center"><img src="src/icon-256.png" alt="SamSearch's icon" width="96" height="96"></p>
+<p align="center">
+  <img src=".github/assets/icon.png" width="104" alt="SamSearch icon">
+</p>
 
 <h1 align="center">SamSearch</h1>
-<p align="center"><b>A launcher for the Mac, Windows and Linux, drawn by <a href="https://github.com/justrach/nanoui">nanoui</a>.</b><br>
-Apps, math, Google, Quick Ask, T3, DigUp and Raycast extensions: one keystroke away. Native Zig, no Electron, about 2 MB.</p>
 
-<p align="center"><a href="https://github.com/justrach/nanolight/raw/refs/heads/main/docs/promo.mp4"><img src="docs/promo-preview.gif" alt="Introducing SamSearch 2.0, now on Mac, Windows and Linux, in 40 seconds: a MacBook Air and a Dell XPS 13 side by side, then Settings, a Raycast extension and a script command on a MacBook Air, then Windows and Linux on a Dell XPS 13" width="760"></a><br><sub><a href="https://github.com/justrach/nanolight/raw/refs/heads/main/docs/promo.mp4"><b>Watch it with sound →</b></a> · <a href="docs/promo.md">How it was made</a></sub></p>
+<p align="center">
+  <b>A Mac launcher that sees your screen, knows your stuff, and hands real work to an agent.</b><br>
+  Ask about what you're looking at, find any link or file, or start a T3 Code thread, all from one keystroke.<br>
+  A fork of <a href="https://github.com/justrach/nanolight">Nanolight</a>: native Zig, about 2 MB, no Electron.
+</p>
 
-<p align="center"><img src="docs/images/nanolight.jpg" alt="SamSearch's panel has found Safari from &quot;saf&quot;" width="760"></p>
+<p align="center">
+  <a href="#-get-started"><b>Get started</b></a> ·
+  <a href="#-quick-ask"><b>Quick Ask</b></a> ·
+  <a href="#-new-t3-thread"><b>T3 threads</b></a> ·
+  <a href="#-digup-search"><b>DigUp</b></a> ·
+  <a href="#how-it-works"><b>How it works</b></a>
+</p>
 
-> SamSearch is Samin Yasar's fork of [justrach/nanolight](https://github.com/justrach/nanolight) (MIT), with a fast assistant, T3 Code and DigUp built in.
+<p align="center">
+  <img alt="macOS 14+" src="https://img.shields.io/badge/macOS-14%2B-black">
+  <img alt="Apple silicon" src="https://img.shields.io/badge/Apple%20silicon-arm64-555">
+  <img alt="Zig 0.17" src="https://img.shields.io/badge/Zig-0.17-f7a41d">
+  <img alt="Claude Haiku 5.5" src="https://img.shields.io/badge/Claude-Haiku%205.5-d97757">
+  <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue">
+</p>
 
-## What SamSearch adds
+<p align="center">
+  <img src=".github/assets/hero.jpg" alt="SamSearch's panel with &quot;find the creator club repo&quot; typed: a Google search, then Ask, New T3 thread and Search DigUp rows" width="100%">
+</p>
 
-Type anything, then pick a row under **Ask & Search** (or press its ⌘ number):
+Launchers are good at opening apps and bad at everything after. SamSearch keeps the fast launcher
+and adds three rows under whatever you type: **ask** a fast model that can see your screen,
+**hand the task to an agent** in T3 Code, or **find the file** with DigUp.
 
-| Row | What happens |
+- **It sees what you see.** A screenshot of the window you were in, plus its real text: the Gmail thread, the doc, the page.
+- **It knows you.** Your profile and memory from Honcho, your GitHub repos, your files and email, your open tabs.
+- **It finds, then opens.** Ask for a link and get the link. Press **⌘1** and it's open in Chrome.
+- **It knows when to stop talking.** Real work ("fix this", "build that") goes straight to a new T3 Code thread.
+
+<table>
+<tr>
+<td width="33%" valign="top">
+
+### ✦ [Quick Ask](#-quick-ask)
+Claude Haiku in the panel · sees your screen and its text · looks things up itself · ⌘1–9 opens links in Chrome · follow-ups
+
+</td>
+<td width="33%" valign="top">
+
+### ▸ [New T3 thread](#-new-t3-thread)
+One keystroke to an agent · your default model and settings · your screen as context · jumps to the thread
+
+</td>
+<td width="33%" valign="top">
+
+### ⌕ [DigUp search](#-digup-search)
+Files by what's in them · PDFs, screenshots, recordings · your Gmail archive and Drive · thumbnails in the panel
+
+</td>
+</tr>
+</table>
+
+## ✦ Quick Ask
+
+Type a question, pick **Ask** (or press its ⌘ number). Claude Haiku answers right in the panel, usually starting within a second.
+
+<p align="center"><img src=".github/assets/ask.jpg" alt="Quick Ask in the panel: it read the Gmail thread on screen and listed what the sponsor wants, then found the hooklab repo link, with ⌘1 to open it" width="760"></p>
+
+- **Your screen, as context.** It reads the open tab in Chrome, Arc or Safari (on Gmail, the thread you're in, plus anything you highlighted). In other apps it reads the text off a screenshot.
+- **It looks things up.** Your GitHub repos (your account and your orgs), what Honcho remembers about your work, your files and email through DigUp, and your open Chrome tabs.
+- **Links, one key away.** Every link in an answer gets a number. **⌘1–⌘9** opens it in Chrome.
+- **Keys:** ↵ follow-up · ⌥↵ answer here, no hand-off · ⌘T continue in T3 · ⇧⌘C copy · ⌘↩ pop it out into its own window · esc back to the list.
+
+## ▸ New T3 thread
+
+Pick **New T3 thread** and SamSearch starts a [T3 Code](https://t3.codes) thread in your project with its default model and settings, with your screen attached as context, then jumps to it. Quick Ask does the same on its own when you ask it for work instead of an answer.
+
+## ⌕ DigUp search
+
+Pick **Search DigUp** to search your Mac by meaning with DigUp: documents, PDFs, screenshots, images, recordings, and your Gmail and Drive archive. DigUp stays warm in the background, so results land in under a second.
+
+<p align="center"><img src=".github/assets/digup.jpg" alt="DigUp results in the panel for &quot;sponsor invoice october&quot;: an invoice PDF, an email, a payment screenshot, a thumbnail, a rate card and a call recording" width="760"></p>
+
+↑↓ to move · ↵ opens · ⌘R shows it in Finder · ⇧⌘C copies the path.
+
+## How it works
+
+<p align="center"><img src=".github/assets/how-it-works.png" alt="How SamSearch works: the launcher and your screen feed three rows, Ask (Quick Ask answers in the panel with GitHub, Honcho, DigUp and Chrome tools), New T3 thread, and Search DigUp" width="100%"></p>
+
+SamSearch is the launcher (`src/`, Zig). Its three rows talk to **Quick Ask** (`quickask/`, Swift), a small helper that runs a server on `127.0.0.1:47213`. SamSearch shows the helper's pages right inside its panel, and opens `quickask://` links for hand-offs. The helper answers only its own host name, and its actions need a header other websites can't send.
+
+| Folder | What's inside |
 | --- | --- |
-| **Ask “…”** | Claude Haiku answers right in the panel. It sees the window you were in (a screenshot, plus the page's text from Chrome/Safari, like a Gmail thread, or text read off the screen), knows who you are (Honcho), and looks things up by itself: your GitHub repos, your memory, your files and email (DigUp) and your open Chrome tabs. Real work goes to a new T3 thread instead. Links come back numbered: ⌘1–⌘9 opens one in Chrome. |
-| **New T3 thread: “…”** | Starts a T3 Code thread in `~/SaminOS` with the default model and settings, then jumps to it. |
-| **Search DigUp for “…”** | DigUp's results in the panel, with thumbnails: ↵ opens, ⌘R shows in Finder. |
+| `src/` | The launcher: rows, panel, in-panel pages, Raycast extensions (from Nanolight) |
+| `quickask/` | The helper: `main.swift` (server, screen context, Haiku and its tools, DigUp, T3), `ask.html`, `digup.html` |
+| `extensions/quick-ask/` | Quick Ask and New T3 Thread as Raycast-style commands |
+| `docs/reverse-engineering/` | How the closed Nanolight 0.2.6 binary was taken apart with REA and Rizin before its source turned up |
 
-These run through **Quick Ask** (`quickask/`), a small Swift helper: a local server on `127.0.0.1:47213` whose pages SamSearch shows in its panel, and the handler for `quickask://` links. It only answers its own host name, and its actions need a header other sites can't send.
+## 🚀 Get started
 
-| Folder | What |
+You need a Mac with Apple silicon on macOS 14+, [Zig 0.17](https://ziglang.org) and Xcode's command line tools.
+
+```sh
+git clone https://github.com/Samin12/samsearch && cd samsearch
+zig build app && cp -R zig-out/SamSearch.app /Applications/   # the launcher
+sh quickask/build.sh                                           # the helper, started for you
+```
+
+Open **SamSearch**, pick the key that opens it, and allow **Quick Ask** in System Settings → Privacy & Security → **Screen Recording**. The first time it reads a browser tab, macOS asks to let it control the browser. Using Nanolight already? Quit it first (they want the same key); SamSearch copies its Raycast extensions and script commands over.
+
+**What Quick Ask talks to** (all on your Mac, all optional except the first):
+
+| | Used for |
 | --- | --- |
-| `quickask/` | The helper: `main.swift` (server, screen context, Haiku + tools, DigUp, T3), `ask.html`, `digup.html`. `./build.sh` builds `~/Applications/Quick Ask.app`, signs it with your Apple Development certificate (so Screen Recording permission sticks) and starts it. |
-| `extensions/quick-ask/` | The same Quick Ask and New T3 Thread as Raycast-style extension commands, for Nanolight or SamSearch's extension list. |
-| `docs/reverse-engineering/` | How the closed 0.2.6 Nanolight binary was taken apart with REA and Rizin before the source turned up, and the binary patch used then. |
+| [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) on `127.0.0.1:8317` | Claude Haiku. Key from `~/.cli-proxy-api/keys.env` |
+| [T3 Code](https://t3.codes) and its `t3` CLI | New threads |
+| DigUp | File, email and Drive search |
+| [Honcho](https://honcho.dev), key in `~/.honcho/config.json` | Who you are, and memory search |
+| [`gh`](https://cli.github.com), signed in | Your repos |
 
-Needs: [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) on `127.0.0.1:8317` (key from `~/.cli-proxy-api/keys.env`), T3 Code's `t3` CLI, DigUp, `gh`, and a Honcho key in `~/.honcho/config.json` (all optional except the first). Quick Ask needs **Screen Recording**, and asks to control Chrome the first time it reads a tab.
-
-## What it does
+## Everything Nanolight does, still here
 
 - **Finds apps as you type**: whole names, starts of words, initials (`ss` is System Settings), letters in order, and typos (`chorme` is Chrome). What you open often climbs.
 - **System Settings panes** (Mac): "login items", "wifi" or "dark mode" lists the pane, under the apps, and Return opens System Settings right at it.
@@ -56,16 +146,6 @@ Off until you turn it on: choose **Sign In with Codegraff** in Settings (or the 
 Two Macs merge rather than overwrite: the key and the suggestions setting follow whichever Mac changed them last, and each app keeps its higher count. Nothing else is sent: no queries, no history, no files. The sign-in key is kept in your Keychain, and **Sign Out of Codegraff** revokes it.
 
 Syncing goes through your Codegraff account, so [Codegraff's terms](https://codegraff.com/terms) and [privacy policy](https://codegraff.com/privacy) apply to it. New accounts made by signing in from SamSearch get $2 of Codegraff credit.
-
-## Install
-
-```sh
-zig build app && cp -R zig-out/SamSearch.app /Applications/   # the launcher
-sh quickask/build.sh                                           # its helper
-```
-Quit Nanolight first if you used it: both want the same key. SamSearch copies Nanolight's Raycast extensions and script commands on its first run.
-
-On first run a short welcome picks the key that opens it and says who else holds it. On the Mac that's ⌘Space, ⌥Space, ⌃Space or ⌥⌘Space (any other, such as ⌥X, can be recorded later in Settings; Spotlight gives up ⌘Space in System Settings → Keyboard → Keyboard Shortcuts → Spotlight); on a PC, Alt Space, Ctrl Alt Space, Ctrl Space or Ctrl Shift Space. Updates use only `Samin12/samsearch` releases and the separate SamSearch cache. Missing releases or failed checks leave the installed app in place; updates are disabled if `NANOUI_UPDATE_FEED` is set.
 
 ## Build
 
