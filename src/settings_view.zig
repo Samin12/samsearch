@@ -16,11 +16,11 @@ const Choice = shortcut.Choice;
 const Palette = panel.Palette;
 const mac = @import("builtin").os.tag == .macos;
 
-const RowKind = enum { choice, suggest, browser, login, menu_bar, sync, terms, updates, welcome, quit };
+const RowKind = enum { choice, suggest, files, browser, login, menu_bar, sync, terms, updates, welcome, quit };
 
-/// As tall as its sections, never past the window. The Mac has two rows
-/// more: where searches open, and the menu bar icon.
-pub const height: f32 = 560 + if (mac) 2 * 46 else 0;
+/// As tall as its sections, never past the window. Tighter Mac spacing
+/// fits file search, where searches open, and the menu bar icon.
+pub const height: f32 = if (mac) 666 else 560;
 
 pub const Settings = struct {
     open: bool = false,
@@ -35,6 +35,7 @@ pub const Settings = struct {
     recording: bool = false,
     refused: bool = false,
     suggest: bool = true,
+    files: bool = false,
     /// Return sends searches to the browser (`Nanolight.searches_out`).
     browser: bool = false,
     login: bool = false,
@@ -62,6 +63,7 @@ pub const Settings = struct {
 
     fn pull(s: *Settings, n: *panel.Nanolight) void {
         s.suggest = n.suggest_on;
+        s.files = n.files_on;
         s.browser = n.searches_out;
         const h = s.hooks(n) orelse return;
         s.menu_bar = h.menu_bar(h.ctx, null);
@@ -98,12 +100,13 @@ pub const Settings = struct {
     }
 
     fn body(s: *Settings, c: *ui.Context, n: *panel.Nanolight, p: Palette, rows: []const RowKind) void {
-        const col = ui.div(c).column().wFull().px(20).pt(2).pb(6).gap(10).grow();
+        const col = ui.div(c).column().wFull().px(20).pt(2).pb(6).gap(if (mac) 8 else 10).grow();
         defer col.end();
         label(c, p, "Open Nanolight with");
         s.choices(c, n, p);
         label(c, p, "Search");
         s.switchRow(c, n, p, rows, .suggest, "Google Suggestions");
+        if (mac) s.switchRow(c, n, p, rows, .files, "File Search");
         if (mac) s.switchRow(c, n, p, rows, .browser, "Open Searches in Browser");
         label(c, p, "This " ++ @import("results.zig").machine);
         s.switchRow(c, n, p, rows, .login, "Open at Login");
@@ -184,6 +187,7 @@ pub const Settings = struct {
         ui.spacer(c);
         mark(c, p, switch (kind) {
             .suggest => s.suggest,
+            .files => s.files,
             .browser => s.browser,
             .login => s.login,
             .menu_bar => s.menu_bar,
@@ -211,6 +215,12 @@ pub const Settings = struct {
                 s.suggest = n.suggest_on;
                 n.built = 1;
                 if (h) |host| host.suggest(host.ctx, s.suggest);
+            },
+            .files => {
+                n.files_on = !n.files_on;
+                s.files = n.files_on;
+                n.built = 1;
+                if (n.kv) |kv| kv.set(@import("files.zig").enabled_key, if (n.files_on) "1" else "0") catch {};
             },
             .browser => {
                 n.searches_out = !n.searches_out;
@@ -340,7 +350,7 @@ pub const Settings = struct {
         switch (kind) {
             // ←/→ step through the four; Return records one's own.
             .choice => if (mac) s.record(n, !s.recording) else s.nudge(n, rowList(s.account), 1),
-            .suggest, .browser, .login, .menu_bar => s.flip(n, kind),
+            .suggest, .files, .browser, .login, .menu_bar => s.flip(n, kind),
             .sync => if (h) |host| switch (s.account) {
                 .signed_out => host.sign_in(host.ctx),
                 .waiting, .signed_in => host.sign_out(host.ctx),
@@ -361,8 +371,8 @@ pub const Settings = struct {
 
 fn rowList(state: account.State) []const RowKind {
     return switch (state) {
-        .signed_out, .starting => if (mac) &.{ .choice, .suggest, .browser, .login, .menu_bar, .sync, .terms, .updates, .welcome, .quit } else &.{ .choice, .suggest, .login, .sync, .terms, .updates, .welcome, .quit },
-        .waiting, .signed_in => if (mac) &.{ .choice, .suggest, .browser, .login, .menu_bar, .sync, .updates, .welcome, .quit } else &.{ .choice, .suggest, .login, .sync, .updates, .welcome, .quit },
+        .signed_out, .starting => if (mac) &.{ .choice, .suggest, .files, .browser, .login, .menu_bar, .sync, .terms, .updates, .welcome, .quit } else &.{ .choice, .suggest, .login, .sync, .terms, .updates, .welcome, .quit },
+        .waiting, .signed_in => if (mac) &.{ .choice, .suggest, .files, .browser, .login, .menu_bar, .sync, .updates, .welcome, .quit } else &.{ .choice, .suggest, .login, .sync, .updates, .welcome, .quit },
     };
 }
 
