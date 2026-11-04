@@ -114,11 +114,12 @@ test "the panel finds, moves, answers and hands off" {
     try std.testing.expect(probe.hidden);
     try std.testing.expectEqual(@as(u16, 1), ix.launches.items[ix.find("System Settings").?]);
 
-    // ⌘2 opens the second row at once: Safari, under System Settings,
-    // which was just opened.
+    // ⌘5 opens the second row at once: Safari, under System Settings,
+    // which was just opened. (⌘1–⌘3 are Ask, T3 and DigUp; the rows
+    // count on from ⌘4.)
     press(&t, &.{ .{ .command = .select_all }, .{ .command = .delete_backward }, .{ .insert = "s" } });
-    try std.testing.expect(t.hasText(results.mod ++ "2"));
-    try std.testing.expect(t.shortcut(.{ .key = '2', .cmd = true }));
+    try std.testing.expect(t.hasText(results.mod ++ "5"));
+    try std.testing.expect(t.shortcut(.{ .key = '5', .cmd = true }));
     try std.testing.expectEqualStrings("/Applications/Safari.app", probe.opened[0..probe.opened_len]);
 
     // Math: answered, and Return copies it.
@@ -241,8 +242,9 @@ test "Google's completions land below, and a search shows in the panel" {
     press(&t, &.{.{ .command = .delete_backward }});
     try std.testing.expectEqual(@as(usize, 0), web.asked_len);
 
-    // ⌘3, the second completion: its words in the field, Google's page in the panel.
-    try std.testing.expect(t.shortcut(.{ .key = '3', .cmd = true }));
+    // ⌘6, the second completion (Google is ⌘4, the first completion ⌘5):
+    // its words in the field, Google's page in the panel.
+    try std.testing.expect(t.shortcut(.{ .key = '6', .cmd = true }));
     t.settle(1);
     try std.testing.expectEqualStrings("liquid glass apple", s.query.text());
     try std.testing.expectEqualStrings("https://www.google.com/search?q=liquid+glass+apple", web.page[0..web.page_len.?]);

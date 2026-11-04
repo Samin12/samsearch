@@ -1,7 +1,8 @@
-#!/bin/zsh
-# Builds ~/Applications/Quick Ask.app: SamSearch's helper (local server on 127.0.0.1:47213 + quickask:// links).
-set -euo pipefail
-cd "${0:A:h}"
+#!/bin/sh
+# Builds Quick Ask, SamSearch's helper (local server on 127.0.0.1:47213 + quickask:// links).
+# macos/install.sh puts it inside SamSearch.app; on its own it goes to ~/Applications/Quick Ask.app.
+set -eu
+cd "$(dirname "$0")"
 APP="${QUICKASK_APP:-$HOME/Applications/Quick Ask.app}"
 
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
@@ -12,7 +13,10 @@ cp Info.plist "$APP/Contents/Info.plist"
 IDENTITY="${CODESIGN_IDENTITY:-$(security find-identity -v -p codesigning | awk -F'"' '/Apple Development/{print $2; exit}')}"
 codesign --force --sign "${IDENTITY:--}" "$APP"
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP"
-pkill -x QuickAsk 2>/dev/null || true
-sleep 0.5
-open -g "$APP"
-echo "Built and started $APP"
+# Inside SamSearch.app (macos/install.sh) SamSearch starts it; on its own, start it now.
+if [ -z "${QUICKASK_NO_START:-}" ]; then
+  pkill -x QuickAsk 2>/dev/null || true
+  sleep 0.5
+  open -g "$APP"
+fi
+echo "Built $APP"

@@ -193,6 +193,36 @@ pub const Results = struct {
         r.n += 1;
     }
 
+    /// Row `i`'s ⌘ number, if it has one. Ask, the T3 thread and DigUp are
+    /// always ⌘1, ⌘2 and ⌘3 wherever they sit; the other rows count on from
+    /// ⌘4 in order. With no handoffs listed (math, an empty query) the rows
+    /// are simply ⌘1 to ⌘9.
+    pub fn number(r: *const Results, i: usize) ?u8 {
+        if (i >= r.n) return null;
+        const handoffs_listed = for (r.slice()) |row| {
+            if (row.kind == .quick_ask) break true;
+        } else false;
+        if (!handoffs_listed) return if (i < 9) @intCast(i + 1) else null;
+        switch (r.rows[i].kind) {
+            .quick_ask => return 1,
+            .new_thread => return 2,
+            .digup => return 3,
+            else => {},
+        }
+        var next: u8 = 4;
+        for (r.rows[0..i]) |row| switch (row.kind) {
+            .quick_ask, .new_thread, .digup => {},
+            else => next += 1,
+        };
+        return if (next <= 9) next else null;
+    }
+
+    /// The row whose ⌘ number is `d` (1–9).
+    pub fn rowFor(r: *const Results, d: u8) ?usize {
+        for (0..r.n) |i| if (r.number(i) == d) return i;
+        return null;
+    }
+
     /// The header above row `i`, if a section starts there.
     pub fn section(r: *const Results, i: usize) ?[]const u8 {
         const k = r.rows[i].kind;
@@ -389,4 +419,27 @@ test "Quick Ask, T3 and DigUp follow Google completions in order with escaped ha
     try t.expectEqualStrings("Ask", Kind.quick_ask.action());
     try t.expectEqualStrings("Start T3 Thread", Kind.new_thread.action());
     try t.expectEqualStrings("Search DigUp", Kind.digup.action());
+}
+
+test "Ask, T3 and DigUp are always ⌘1, ⌘2, ⌘3; the rest count on from ⌘4" {
+    const t = std.testing;
+    var ix = try testIndex(t.allocator, &.{ "Safari", "System Settings", "Calculator" });
+    defer ix.deinit();
+    var r: Results = .{};
+    r.build("saf", &ix, &.{}, &.{"safari download"}, &.{});
+    // Safari, Google, a completion, then the three handoffs.
+    try t.expectEqual(Kind.app, r.rows[0].kind);
+    try t.expectEqual(@as(?u8, 4), r.number(0));
+    try t.expectEqual(@as(?u8, 5), r.number(1));
+    try t.expectEqual(@as(?u8, 6), r.number(2));
+    try t.expectEqual(Kind.quick_ask, r.rows[r.rowFor(1).?].kind);
+    try t.expectEqual(Kind.new_thread, r.rows[r.rowFor(2).?].kind);
+    try t.expectEqual(Kind.digup, r.rows[r.rowFor(3).?].kind);
+    try t.expectEqual(@as(?usize, 0), r.rowFor(4));
+    try t.expectEqual(@as(?usize, null), r.rowFor(9));
+    // No handoffs (math, an empty query): plain ⌘1 to ⌘9.
+    r.build("2+2", &ix, &.{}, &.{}, &.{});
+    try t.expectEqual(@as(?u8, 1), r.number(0));
+    r.build("", &ix, &.{ 2, 0 }, &.{}, &.{});
+    try t.expectEqual(@as(?usize, 1), r.rowFor(2));
 }

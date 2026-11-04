@@ -165,8 +165,8 @@ test "SamSearch handoffs use local previews and page-specific command Return" {
         try std.testing.expect(t.hasText("T3 Code · default settings"));
         try std.testing.expect(t.hasText("Search DigUp for “liquid glass & UI”"));
         try std.testing.expect(t.hasText("Files, screenshots, email and Drive"));
-        // ⌘2 runs Quick Ask, using the same activation as Return.
-        try std.testing.expect(t.shortcut(.{ .key = '2', .cmd = true }));
+        // ⌘1 is always Quick Ask, using the same activation as Return.
+        try std.testing.expect(t.shortcut(.{ .key = '1', .cmd = true }));
         t.settle(1);
         try std.testing.expectEqualStrings("http://127.0.0.1:47213/ask?q=liquid+glass+%26+UI", web.page[0..web.page_len.?]);
         try std.testing.expect(s.previewing and !web.probe.hidden);
@@ -194,8 +194,8 @@ test "SamSearch handoffs use local previews and page-specific command Return" {
         s.reveal();
         web.probe = .{};
         t.settle(1);
-        // ⌘3 creates a thread; Return and ⌘↩ use the same deep link.
-        try std.testing.expect(t.shortcut(.{ .key = '3', .cmd = true }));
+        // ⌘2 is always the T3 thread; Return and ⌘↩ use the same deep link.
+        try std.testing.expect(t.shortcut(.{ .key = '2', .cmd = true }));
         try std.testing.expectEqualStrings("quickask://t3-thread-create?q=liquid+glass+%26+UI", web.probe.opened[0..web.probe.opened_len]);
         try std.testing.expect(web.probe.hidden and !s.previewing);
         for ([_]bool{ false, true }) |command| {
@@ -212,8 +212,8 @@ test "SamSearch handoffs use local previews and page-specific command Return" {
         s.reveal();
         web.probe = .{};
         t.settle(1);
-        // ⌘4 runs DigUp in the panel. ⌘↩ while previewing is a no-op.
-        try std.testing.expect(t.shortcut(.{ .key = '4', .cmd = true }));
+        // ⌘3 is always DigUp, in the panel. ⌘↩ while previewing is a no-op.
+        try std.testing.expect(t.shortcut(.{ .key = '3', .cmd = true }));
         t.settle(1);
         try std.testing.expectEqualStrings("http://127.0.0.1:47213/digup?q=liquid+glass+%26+UI", web.page[0..web.page_len.?]);
         try std.testing.expect(!t.hasText("Open in Browser"));

@@ -561,6 +561,8 @@ pub fn main(init: std.process.Init) !void {
     // The first run: the welcome, in the panel.
     if (!shortcut.onboarded(kv)) o.start(live.choice);
     if (mac) live.tray = try app.newTray(.{ .symbol = "magnifyingglass", .tooltip = "SamSearch" });
+    // Quick Ask, the helper inside the app: the Ask and DigUp pages, the T3 links.
+    if (mac) @import("helper_mac.zig").start(init.io);
     // The menu bar icon, unless Settings took it away.
     if (kv.get(init.gpa, menu_bar_key) catch null) |v| {
         defer init.gpa.free(v);

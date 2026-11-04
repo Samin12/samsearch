@@ -31,8 +31,8 @@
 </p>
 
 Launchers are good at opening apps and bad at everything after. SamSearch keeps the fast launcher
-and adds three rows under whatever you type: **ask** a fast model that can see your screen,
-**hand the task to an agent** in T3 Code, or **find the file** with DigUp.
+and adds three rows under whatever you type, always on the same keys: **⌘1 ask** a fast model
+that can see your screen, **⌘2 hand the task to an agent** in T3 Code, or **⌘3 find the file** with DigUp.
 
 - **It sees what you see.** A screenshot of the window you were in, plus its real text: the Gmail thread, the doc, the page.
 - **It knows you.** Your profile and memory from Honcho, your GitHub repos, your files and email, your open tabs.
@@ -64,7 +64,7 @@ Files by what's in them · PDFs, screenshots, recordings · your Gmail archive a
 
 ## ✦ Quick Ask
 
-Type a question, pick **Ask** (or press its ⌘ number). Claude Haiku answers right in the panel, usually starting within a second.
+Type a question and press **⌘1** (or pick **Ask**). Claude Haiku answers right in the panel, usually starting within a second.
 
 <p align="center"><img src=".github/assets/ask.jpg" alt="Quick Ask in the panel: it read the Gmail thread on screen and listed what the sponsor wants, then found the hooklab repo link, with ⌘1 to open it" width="760"></p>
 
@@ -75,11 +75,11 @@ Type a question, pick **Ask** (or press its ⌘ number). Claude Haiku answers ri
 
 ## ▸ New T3 thread
 
-Pick **New T3 thread** and SamSearch starts a [T3 Code](https://t3.codes) thread in your project with its default model and settings, with your screen attached as context, then jumps to it. Quick Ask does the same on its own when you ask it for work instead of an answer.
+Press **⌘2** (or pick **New T3 thread**) and SamSearch starts a [T3 Code](https://t3.codes) thread in your project with its default model and settings, with your screen attached as context, then jumps to it. Quick Ask does the same on its own when you ask it for work instead of an answer.
 
 ## ⌕ DigUp search
 
-Pick **Search DigUp** to search your Mac by meaning with DigUp: documents, PDFs, screenshots, images, recordings, and your Gmail and Drive archive. DigUp stays warm in the background, so results land in under a second.
+Press **⌘3** (or pick **Search DigUp**) to search your Mac by meaning with DigUp: documents, PDFs, screenshots, images, recordings, and your Gmail and Drive archive. DigUp stays warm in the background, so results land in under a second.
 
 <p align="center"><img src=".github/assets/digup.jpg" alt="DigUp results in the panel for &quot;sponsor invoice october&quot;: an invoice PDF, an email, a payment screenshot, a thumbnail, a rate card and a call recording" width="760"></p>
 
@@ -94,7 +94,7 @@ SamSearch is the launcher (`src/`, Zig). Its three rows talk to **Quick Ask** (`
 | Folder | What's inside |
 | --- | --- |
 | `src/` | The launcher: rows, panel, in-panel pages, Raycast extensions (from Nanolight) |
-| `quickask/` | The helper: `main.swift` (server, screen context, Haiku and its tools, DigUp, T3), `ask.html`, `digup.html` |
+| `quickask/` | The helper (bundled into the app by `macos/install.sh`): `main.swift` (server, screen context, Haiku and its tools, DigUp, T3), `ask.html`, `digup.html` |
 | `extensions/quick-ask/` | Quick Ask and New T3 Thread as Raycast-style commands |
 | `docs/reverse-engineering/` | How the closed Nanolight 0.2.6 binary was taken apart with REA and Rizin before its source turned up |
 
@@ -104,9 +104,10 @@ You need a Mac with Apple silicon on macOS 14+, [Zig 0.17](https://ziglang.org) 
 
 ```sh
 git clone https://github.com/Samin12/samsearch && cd samsearch
-zig build app && cp -R zig-out/SamSearch.app /Applications/   # the launcher
-sh quickask/build.sh                                           # the helper, started for you
+sh macos/install.sh
 ```
+
+One app: the launcher with its Quick Ask helper inside (`Contents/Helpers`), signed with your Apple Development certificate so macOS permissions survive rebuilds, installed to `/Applications` and started. SamSearch starts its helper itself.
 
 Open **SamSearch**, pick the key that opens it, and allow **Quick Ask** in System Settings → Privacy & Security → **Screen Recording**. The first time it reads a browser tab, macOS asks to let it control the browser. Using Nanolight already? Quit it first (they want the same key); SamSearch copies its Raycast extensions and script commands over.
 

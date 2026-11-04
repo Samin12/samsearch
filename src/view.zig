@@ -244,10 +244,13 @@ pub const Nanolight = struct {
         if (c.shortcut(.{ .key = S.up }) or c.shortcut(.{ .key = 'p', .ctrl = true })) {
             if (n > 0) s.sel = (s.sel + n - 1) % n;
         }
-        // ⌘1…⌘9: the row of that number, at once.
-        for (0..@min(n, 9)) |k| if (c.shortcut(.{ .key = @intCast('1' + k), .cmd = true })) {
-            s.sel = k;
-            s.activate(c);
+        // ⌘1…⌘9: the row of that number, at once (Ask, T3 and DigUp are
+        // always ⌘1, ⌘2, ⌘3: `Results.number`).
+        for (1..10) |d| if (c.shortcut(.{ .key = @intCast('0' + d), .cmd = true })) {
+            if (s.res.rowFor(@intCast(d))) |k| {
+                s.sel = k;
+                s.activate(c);
+            }
         };
         if (c.shortcut(.{ .key = S.escape })) {
             if (s.query.text().len > 0) s.query.clear() else if (s.host) |h| h.hide(h.ctx);
@@ -446,7 +449,7 @@ pub const Nanolight = struct {
         if (i == s.sel) {
             ui.text(c, if (r.kind == .app or r.kind == .file or r.kind == .settings or r.kind == .pane) "Open" else "Go", .{ .size = 12, .weight = .medium, .color = p.sub });
             ui.kbd(c, "↩");
-        } else if (i < 9) ui.textf(c, .{ .size = 12, .weight = .medium, .color = p.sub.alpha(0.5), .tabular = true }, "{s}{d}", .{ results.mod, i + 1 });
+        } else if (s.res.number(i)) |num| ui.textf(c, .{ .size = 12, .weight = .medium, .color = p.sub.alpha(0.5), .tabular = true }, "{s}{d}", .{ results.mod, num });
     }
 
     fn calcCard(s: *Nanolight, c: *ui.Context, p: Palette) void {
