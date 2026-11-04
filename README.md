@@ -190,4 +190,4 @@ Forked from [justrach/nanolight](https://github.com/justrach/nanolight), with th
 
 ## License
 
-MIT
+MIT, as Nanolight is. SamSearch is built on [Nanolight](https://github.com/justrach/nanolight) by justrach; see [LICENSE](LICENSE).
