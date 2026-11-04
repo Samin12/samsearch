@@ -12,6 +12,8 @@ pub const Pane = struct {
     /// The extension's bundle id: its address is `url_prefix ++ id`.
     id: []const u8,
     /// Its bundle in /System/Library/ExtensionKit/Extensions, without `.appex`.
+    /// Where a macOS names it differently, the one macOS 15 (the oldest
+    /// Nanolight runs on) has.
     appex: []const u8,
     keywords: []const []const u8 = &.{},
 
@@ -31,7 +33,7 @@ pub const all = [_]Pane{
     .{ .name = "Sound", .id = "com.apple.Sound-Settings.extension", .appex = "Sound", .keywords = &.{ "volume", "audio", "speakers", "microphone", "output", "input" } },
     .{ .name = "Focus", .id = "com.apple.Focus-Settings.extension", .appex = "FocusSettingsExtension", .keywords = &.{ "do not disturb", "dnd" } },
     .{ .name = "Screen Time", .id = "com.apple.Screen-Time-Settings.extension", .appex = "ScreenTimePreferencesExtension", .keywords = &.{ "parental controls", "app limits" } },
-    .{ .name = "General", .id = "com.apple.systempreferences.GeneralSettings", .appex = "GeneralSettings" },
+    .{ .name = "General", .id = "com.apple.systempreferences.GeneralSettings", .appex = "Shell" },
     .{ .name = "About", .id = "com.apple.SystemProfiler.AboutExtension", .appex = "AboutExtension", .keywords = &.{ "about this mac", "serial number", "macos version" } },
     .{ .name = "Software Update", .id = "com.apple.Software-Update-Settings.extension", .appex = "SoftwareUpdateSettingsExtension", .keywords = &.{ "update macos", "upgrade" } },
     .{ .name = "Storage", .id = "com.apple.settings.Storage", .appex = "Storage", .keywords = &.{ "disk space", "free space" } },
@@ -176,6 +178,9 @@ test "panes are found by name and by the words people use (#12)" {
     try t.expectEqual(@as(usize, 0), rank("saf", &out));
     try t.expectEqual(@as(usize, 0), rank("w", &out));
     try t.expectEqualStrings(url_prefix ++ "com.apple.LoginItems-Settings.extension", urls[13]);
+    // General's extension is GeneralSettings.appex from macOS 26; macOS 15,
+    // the oldest Nanolight runs on, calls it Shell.appex.
+    try std.testing.expectEqualStrings("Shell", all[8].appex);
 }
 
 test "every pane's extension is on this Mac's macOS, or is known not to be" {
