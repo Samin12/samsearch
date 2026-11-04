@@ -132,12 +132,15 @@ pub const Results = struct {
         // System Settings' panes, in their own section. A section's header
         // is less than a row: one completion fewer pays for it, so the
         // panel never grows past its tallest (view.max_height).
+        // Only as many panes as fit beside the apps, the handoffs and the
+        // header: a full list of apps ("hola") leaves room for two, not three.
         var pane_rows: [max_panes]search.Ranked = undefined;
-        const np = if (isSettings(query)) 0 else panes.rank(query, &pane_rows);
+        const pane_room = @min(max_panes, (max_rows -| r.n -| handoffs) -| 1);
+        const np = if (isSettings(query) or pane_room == 0) 0 else panes.rank(query, pane_rows[0..pane_room]);
         for (pane_rows[0..np]) |x| r.push(.{ .kind = .pane, .app = x.index, .match = x.match });
         // The search for what was typed, its completions (as many as leave
         // room for the rest), then Grok and X.
-        const room = max_rows - r.n - handoffs - @intFromBool(np > 0);
+        const room = max_rows -| r.n -| handoffs -| @intFromBool(np > 0);
         r.push(.{ .kind = .search_web });
         for (0..@min(web.len, max_web, room)) |i| r.push(.{ .kind = .suggest, .web = @intCast(i) });
         r.push(.{ .kind = .ask_grok });
@@ -278,4 +281,29 @@ test "System Settings' panes come under the apps and keep the panel's height (#1
     // Math lists no panes.
     r.build("2+2", &ix, &.{}, &.{});
     try t.expectEqual(@as(usize, 1), r.n);
+}
+
+test "a full list of apps and three panes still fits, with every handoff" {
+    if (!mac) return error.SkipZigTest;
+    const t = std.testing;
+    // Six apps match "ho", and so do three panes (Desktop & Dock, Sound,
+    // Keyboard): typing "hola" used to overflow the room left for Google.
+    var ix = try testIndex(t.allocator, &.{ "Home", "Hopper", "Hotspot Shield", "Photos", "Shortcuts", "Photo Booth", "Phone" });
+    defer ix.deinit();
+    var r: Results = .{};
+    r.build("ho", &ix, &.{}, &.{ "hola", "hotmail", "hoy", "horoscopo" });
+    var apps_n: usize = 0;
+    var panes_n: usize = 0;
+    for (r.slice()) |row| switch (row.kind) {
+        .app => apps_n += 1,
+        .pane => panes_n += 1,
+        else => {},
+    };
+    try t.expectEqual(@as(usize, max_apps), apps_n);
+    // The header costs a row: two panes, not three.
+    try t.expect(panes_n <= max_panes - 1);
+    try t.expect(r.n <= max_rows - @as(usize, @intFromBool(panes_n > 0)));
+    try t.expectEqual(Kind.search_web, r.rows[r.n - 3].kind);
+    try t.expectEqual(Kind.ask_grok, r.rows[r.n - 2].kind);
+    try t.expectEqual(Kind.search_x, r.rows[r.n - 1].kind);
 }
