@@ -193,7 +193,10 @@ pub fn excluded(path: []const u8, extra: []const u8) bool {
     const h = home();
     if (h.len > 0) {
         const library = std.fmt.bufPrint(&library_buf, "{s}/Library", .{h}) catch return true;
-        if (within(path, library)) return true;
+        // iCloud Drive lives in Library; the rest of it is the system's.
+        var icloud_buf: [max_path]u8 = undefined;
+        const icloud = std.fmt.bufPrint(&icloud_buf, "{s}/Mobile Documents/com~apple~CloudDocs", .{library}) catch return true;
+        if (within(path, library) and !within(path, icloud)) return true;
     }
     for ([_][]const u8{ "node_modules", ".git", "Library/Caches", ".cache", ".Trash", ".zig-cache", "zig-cache", "zig-out" }) |part| {
         if (hasComponent(path, part)) return true;
@@ -244,7 +247,8 @@ pub fn find(io: std.Io, query: []const u8, locations: []const u8, extra: []const
     const a = arena.allocator();
     var argv: std.ArrayList([]const u8) = .empty;
     argv.append(a, "/usr/bin/mdfind") catch return false;
-    var lines = std.mem.tokenizeScalar(u8, if (std.mem.trim(u8, locations, " \r\n\t").len == 0) home() else locations, '\n');
+    const everywhere = if (std.mem.trim(u8, locations, " \r\n\t").len == 0) defaultLocations(io, a) else locations;
+    var lines = std.mem.tokenizeScalar(u8, everywhere, '\n');
     while (lines.next()) |line| {
         var buf: [max_path]u8 = undefined;
         const path = expand(&buf, std.mem.trim(u8, line, " \r\t")) orelse continue;
@@ -264,6 +268,53 @@ pub fn find(io: std.Io, query: []const u8, locations: []const u8, extra: []const
         ok = collect(io, argv.items, query, extra, out, @min(deadline, now + 500)) or ok;
     }
     return ok;
+}
+
+/// With no folders chosen: home (iCloud Drive is inside it) and every drive
+/// plugged in now. Installers' disk images are read-only and left out, as are
+/// the startup disk's own links and Recovery.
+fn defaultLocations(io: std.Io, a: std.mem.Allocator) []const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    out.appendSlice(a, home()) catch return home();
+    var dir = std.Io.Dir.cwd().openDir(io, "/Volumes", .{ .iterate = true }) catch return out.items;
+    defer dir.close(io);
+    var it = dir.iterate();
+    var seen: usize = 0;
+    while (seen < 64) : (seen += 1) {
+        const e = (it.next(io) catch null) orelse break;
+        var buf: [max_path]u8 = undefined;
+        const path = std.fmt.bufPrintSentinel(&buf, "/Volumes/{s}", .{e.name}, 0) catch continue;
+        if (!volume(e.name, e.kind, std.c.access(path, 2) == 0)) continue;
+        out.append(a, '\n') catch break;
+        out.appendSlice(a, path) catch break;
+    }
+    return out.items;
+}
+
+/// A drive worth searching: a real, writable folder (not the startup disk's
+/// link, Recovery, or a mounted installer).
+pub fn volume(name: []const u8, kind: std.Io.File.Kind, writable: bool) bool {
+    return kind == .directory and writable and name.len > 0 and name[0] != '.' and !std.mem.eql(u8, name, "Recovery");
+}
+
+test "every writable drive is searched, installers and Recovery are not" {
+    const t = std.testing;
+    try t.expect(volume("Samin Razer NVME", .directory, true));
+    try t.expect(volume("RICOH GR", .directory, true));
+    try t.expect(!volume("Macintosh HD", .sym_link, true));
+    try t.expect(!volume("Kylon 1.1.1-arm64", .directory, false));
+    try t.expect(!volume("Recovery", .directory, true));
+    try t.expect(!volume(".timemachine", .directory, true));
+}
+
+test "iCloud Drive is searched, the rest of Library is not" {
+    const h = home();
+    if (h.len == 0) return error.SkipZigTest;
+    var buf: [max_path]u8 = undefined;
+    const t = std.testing;
+    try t.expect(!excluded(try std.fmt.bufPrint(&buf, "{s}/Library/Mobile Documents/com~apple~CloudDocs/Tax Return.pdf", .{h}), ""));
+    try t.expect(excluded(try std.fmt.bufPrint(&buf, "{s}/Library/Mobile Documents/iCloud~md~obsidian/note.md", .{h}), ""));
+    try t.expect(excluded(try std.fmt.bufPrint(&buf, "{s}/Library/Preferences/x.plist", .{h}), ""));
 }
 
 fn collect(io: std.Io, argv: []const []const u8, query: []const u8, extra: []const u8, out: *List, deadline: i64) bool {
