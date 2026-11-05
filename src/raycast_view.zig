@@ -101,10 +101,11 @@ pub const Ext = struct {
 
     /// The host's new top view; `arena` holds it and is now this one's.
     pub fn show(e: *Ext, arena: std.heap.ArenaAllocator, v: model.View) void {
-        if (e.arena) |*a| a.deinit();
-        e.arena = arena;
+        // The old view lives in the old arena: read it before freeing that.
         const was_list = if (e.view) |old| old.isList() else true;
         e.view = v;
+        if (e.arena) |*a| a.deinit();
+        e.arena = arena;
         // A new kind of view (a push, a pop) starts at the top.
         if (!v.isList() or !was_list) e.sel = 0;
         if (v.isList()) {

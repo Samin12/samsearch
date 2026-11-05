@@ -153,3 +153,18 @@ test "a compact script's last line, as the detail's heading" {
     if (std.c.getenv("NANOLIGHT_SHOT2")) |p| try t.screenshot(std.mem.span(p));
     try std.testing.expect(t.hasText("Hello, Rach - from a script"));
 }
+
+test "a list that renders again keeps its selection, and the old render is freed only after it is read" {
+    const gpa = std.testing.allocator;
+    var ext: Ext = .{ .gpa = gpa };
+    defer ext.deinit();
+    const line = "{\"type\":\"render\",\"view\":{\"kind\":\"list\",\"sections\":[{\"items\":[{\"id\":\"a\",\"title\":\"One\"},{\"id\":\"b\",\"title\":\"Two\"},{\"id\":\"c\",\"title\":\"Three\"}]}]}}";
+    // A refreshing extension (a timer, a live feed) renders the same list over and over.
+    for (0..3) |i| {
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        const m = try model.parse(arena.allocator(), line);
+        ext.show(arena, m.view.?);
+        if (i == 0) ext.sel = 2;
+        try std.testing.expectEqual(@as(usize, 2), ext.sel);
+    }
+}
