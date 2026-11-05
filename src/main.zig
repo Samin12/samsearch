@@ -73,6 +73,8 @@ pub const Live = struct {
     asking_len: usize = 0,
     waiting: u32 = 0,
     files: @import("files_live.zig").State = .{},
+    digup: @import("digup_live.zig").State = .{},
+    drag: if (mac) @import("drag_mac.zig").Drag else struct {} = .{},
     /// Updates from GitHub's releases (a signed build only), and the menu
     /// bar icon whose menu offers one once it's ready.
     updater: ?*nanoui.Updater = null,
@@ -94,7 +96,18 @@ pub const Live = struct {
     fn host(l: *Live) view.Host {
         const bind = @import("settings_bind.zig");
         bind.box.ctx = l;
-        return .{ .ctx = l, .open = open, .hide = hide, .resize = resize, .suggest = ask, .files = if (mac) @import("files_live.zig").askFiles else null, .preview = if (mac) showPage else null, .settings = &bind.box };
+        return .{ .ctx = l, .open = open, .hide = hide, .resize = resize, .suggest = ask, .files = if (mac) @import("files_live.zig").askFiles else null, .digup = if (mac) @import("digup_live.zig").ask else null, .reveal = if (mac) revealFile else null, .preview = if (mac) showPage else null, .settings = &bind.box };
+    }
+
+    fn revealFile(_: *anyopaque, path: []const u8) void {
+        if (comptime !mac) return;
+        const objc = nanoui.objc;
+        const pool = objc.Pool.push();
+        defer pool.pop();
+        const url = objc.msg(objc.Object, objc.class("NSURL"), "fileURLWithPath:", .{objc.nsString(path)});
+        const urls = objc.msg(objc.Object, objc.class("NSArray"), "arrayWithObject:", .{url});
+        const ws = objc.msg(objc.Object, objc.class("NSWorkspace"), "sharedWorkspace", .{});
+        objc.msg(void, ws, "activateFileViewerSelectingURLs:", .{urls});
     }
 
     fn open(ctx: *anyopaque, target: []const u8) void {
@@ -283,6 +296,7 @@ pub const Live = struct {
         t.setMenu("SamSearch", &.{
             .{ .label = "Settings…", .accelerator = "Cmd+,", .click = .of(l, Live.menuSettings) },
             .{ .label = "Open SamSearch", .click = .of(l, Live.menuShow) },
+            .{ .label = "Reset Panel Position", .click = .of(l, Live.resetPosition) },
             .{ .label = "Welcome…", .click = .of(l, Live.welcome) },
             .{ .label = "Google Suggestions", .kind = .checkbox, .checked = l.s.suggest_on, .click = .of(l, Live.toggleSuggest) },
             .separator,
@@ -292,6 +306,10 @@ pub const Live = struct {
             .{ .label = label, .disabled = l.updater == null, .click = .of(l, Live.updateNow) },
             .{ .label = "Quit SamSearch", .role = .quit },
         }) catch {};
+    }
+
+    fn resetPosition(l: *Live, _: *nanoui.menu.Item) void {
+        if (comptime mac) @import("panel_position.zig").reset(l.kv);
     }
 
     fn updateNow(l: *Live, _: *nanoui.menu.Item) void {
@@ -313,17 +331,19 @@ pub const Live = struct {
     fn keyChanged(ctx: *anyopaque, w: *nanoui.Window) void {
         const l: *Live = @ptrCast(@alignCast(ctx));
         if (w.isFocused()) return;
+        if (comptime mac) if (l.drag.active) return;
         if (l.recorder.active()) record(l, false);
         l.through.stop();
         l.s.note = "";
-        // The Mac's popover hides itself; elsewhere the panel goes as
-        // another window takes the keys.
-        if (!mac and w.isVisible()) w.hide();
+        // Hide here rather than in nanoui's popover delegate, so native
+        // file drags may keep their source window until they finish.
+        if (w.isVisible()) w.hide();
         if (!mac) @import("update_pc.zig").away(l);
     }
 
     fn hide(ctx: *anyopaque) void {
         const l: *Live = @ptrCast(@alignCast(ctx));
+        if (comptime mac) if (l.drag.active) return;
         if (l.keep_open) {
             l.keep_open = false;
             return;
@@ -342,6 +362,7 @@ pub const Live = struct {
 
     fn toggle(ctx: *anyopaque) void {
         const l: *Live = @ptrCast(@alignCast(ctx));
+        if (comptime mac) if (l.drag.active) return;
         const w = l.window orelse return;
         const showing = w.isVisible() and panel.focused(w);
         l.o.pressed(showing);
@@ -521,9 +542,14 @@ pub fn main(init: std.process.Init) !void {
     var s: Nanolight = .{ .index = &index, .kv = kv, .onboard = &o };
     defer s.query.deinit();
     defer s.found.deinit();
+    defer s.dug.deinit();
     var live: Live = .{ .app = app, .s = &s, .o = &o, .kv = kv, .choice = shortcut.load(kv, init.gpa) };
     s.host = live.host();
     @import("files_live.zig").load(&live);
+    if (kv.get(init.gpa, @import("digup.zig").enabled_key) catch null) |v| {
+        defer init.gpa.free(v);
+        s.digup_on = !std.mem.eql(u8, v, "0");
+    }
     // Google's completions are on unless turned off in Settings.
     if (kv.get(init.gpa, suggest_key) catch null) |v| {
         defer init.gpa.free(v);
@@ -556,6 +582,8 @@ pub fn main(init: std.process.Init) !void {
     panel.setup(app, live.window.?, &s, if (o.active) o.height() else s.height());
     live.useKey(live.choice);
     live.through = .{ .window = live.window, .height = &s.last_h };
+    if (mac) live.drag.start(live.window.?, &s, &live.through);
+    defer if (mac) live.drag.stop();
     live.preview.watch(.{ .ctx = &live, .func = Live.pageKey });
     o.hooks = live.hooks();
     // The first run: the welcome, in the panel.

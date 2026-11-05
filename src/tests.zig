@@ -10,6 +10,8 @@ test {
     _ = @import("search.zig");
     _ = @import("calc.zig");
     _ = @import("results.zig");
+    _ = @import("digup.zig");
+    _ = @import("panel_position.zig");
     _ = @import("data_dir.zig");
     _ = @import("suggest.zig");
     _ = @import("promo_camera.zig");
@@ -25,10 +27,12 @@ test {
     _ = @import("tests_ext.zig");
     _ = @import("tests_prefs.zig");
     _ = @import("tests_files.zig");
+    _ = @import("tests_digup.zig");
     switch (@import("builtin").os.tag) {
         .macos => {
             _ = @import("single_mac.zig");
             _ = @import("clickthrough.zig");
+            _ = @import("drag_mac.zig");
             _ = @import("hotkey_mac.zig");
             _ = @import("recorder.zig");
         },

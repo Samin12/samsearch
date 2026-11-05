@@ -24,6 +24,8 @@ pub const ClickThrough = struct {
     global: ?objc.Object = null,
     local: ?objc.Object = null,
     ignoring: bool = false,
+    /// AppKit owns a press or drag until its release, even outside the panel.
+    holding: bool = false,
 
     /// As the panel shows: follow the pointer.
     pub fn start(c: *ClickThrough) void {
@@ -47,6 +49,7 @@ pub const ClickThrough = struct {
             objc.release(obj);
             m.* = null;
         };
+        c.holding = false;
         c.set(false);
     }
 
@@ -56,6 +59,7 @@ pub const ClickThrough = struct {
         const w = c.window orelse return;
         if (c.global == null) return;
         if (!w.isVisible()) return c.stop();
+        if (c.holding) return c.set(false);
         const at = objc.msg(objc.CGPoint, objc.class("NSEvent"), "mouseLocation", .{});
         const f = objc.msg(objc.CGRect, w.nswindow, "frame", .{});
         const h: f64 = if (c.height) |p| p.* else 0;

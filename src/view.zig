@@ -9,6 +9,7 @@ const motion = ui.motion;
 const Index = @import("apps.zig").Index;
 const results = @import("results.zig");
 const files = @import("files.zig");
+const digup = @import("digup.zig");
 const files_view = @import("files_view.zig");
 const suggest = @import("suggest.zig");
 const text = @import("text.zig");
@@ -27,6 +28,8 @@ pub const Host = struct {
     /// Request completions, returned through `Nanolight.answered`.
     suggest: ?*const fn (ctx: *anyopaque, query: []const u8) void = null,
     files: ?*const fn (ctx: *anyopaque, query: []const u8) void = null,
+    digup: ?*const fn (ctx: *anyopaque, query: []const u8) void = null,
+    reveal: ?*const fn (ctx: *anyopaque, path: []const u8) void = null,
     /// Shows a search's page in the panel, over `webArea`; null takes it
     /// away. Without it, searches open in the browser.
     preview: ?*const fn (ctx: *anyopaque, url: ?[]const u8) void = null,
@@ -103,6 +106,11 @@ pub const Nanolight = struct {
     /// Local file search is opt-in on this Mac.
     files_on: bool = false,
     found: files.List = .{},
+    digup_on: bool = true,
+    dug: digup.List = .{},
+    /// Last frame's controls, for the Mac's native drag gestures.
+    row_ids: [results.max_rows]u64 = @splat(0),
+    query_id: u64 = 0,
     /// Google's completions: whether to ask, those listed, the answers.
     suggest_on: bool = true,
     web: suggest.List = .{},
@@ -157,6 +165,8 @@ pub const Nanolight = struct {
     }
 
     pub fn panel(s: *Nanolight, c: *ui.Context) void {
+        s.row_ids = @splat(0);
+        s.query_id = 0;
         const p = palette(c.theme.dark);
         const shell = ui.div(c).column().w(width).rounded(18).border(p.hair).clip();
         if (s.own_glass) {
@@ -231,6 +241,11 @@ pub const Nanolight = struct {
             if (c.shortcut(.{ .key = S.escape })) s.back();
             return;
         }
+        if (c.shortcut(.{ .key = 'r', .cmd = true })) {
+            if (s.sel < s.res.n) if (s.filePath(s.res.rows[s.sel])) |path| {
+                if (s.host) |h| if (h.reveal) |f| f(h.ctx, path);
+            };
+        }
         // ⌘,: Settings, as on the Mac. The comma never reaches the field.
         if (c.shortcut(.{ .key = ',', .cmd = true })) return s.openSettings();
         // ⌘↩: a search in the browser rather than in the panel.
@@ -263,6 +278,7 @@ pub const Nanolight = struct {
         defer bar.end();
         ui.icon(c, "magnifyingglass", .{ .size = 19, .weight = .medium, .color = p.sub, .frame = 22 });
         s.rebuild();
+        s.query_id = c.peekId(null);
         const r = ui.textField(c, &s.query, .{
             .suggestion = s.completion(),
             .bare = true,
@@ -315,6 +331,8 @@ pub const Nanolight = struct {
         if (h == s.built) return;
         s.built = h;
         files_view.rebuild(s);
+        s.dug.deinit();
+        if (s.host) |host| if (host.digup) |ask| ask(host.ctx, q);
         s.web.n = 0;
         if (s.host) |host| if (host.suggest) |ask| if (s.suggest_on and suggest.eligible(q) and @import("calc.zig").eval(q) == null) {
             if (!s.cache.lookup(q, &s.web)) ask(host.ctx, q);
@@ -329,7 +347,7 @@ pub const Nanolight = struct {
         var sug: [results.max_apps]u32 = undefined;
         const ns = s.index.suggestions(&sug);
         var web: [suggest.max_rows][]const u8 = undefined;
-        s.res.build(s.query.text(), s.index, sug[0..ns], s.web.slices(&web), &s.found);
+        s.res.buildWithDigup(s.query.text(), s.index, sug[0..ns], s.web.slices(&web), &s.found, if (s.digup_on) s.dug.found.n else 0);
     }
 
     /// Google's completions of `typed` (what `Host.suggest` asked): kept,
@@ -354,7 +372,7 @@ pub const Nanolight = struct {
         for (s.res.slice(), 0..) |now, i| {
             const same_row = now.kind == r.kind and switch (r.kind) {
                 .app, .pane => now.app == r.app,
-                .file => now.file == r.file,
+                .file, .digup_hit => now.file == r.file,
                 .suggest => suggest.same(s.web.get(now.web), was_text[0..was_len]),
                 else => true,
             };
@@ -366,6 +384,41 @@ pub const Nanolight = struct {
     }
 
     pub const filesAnswered = files_view.filesAnswered;
+
+    pub fn digupAnswered(s: *Nanolight, typed: []const u8, found: *digup.List) void {
+        if (!s.digup_on or !std.mem.eql(u8, typed, std.mem.trim(u8, s.query.text(), " \t\r\n"))) return;
+        const was: ?Row = if (s.sel < s.res.n) s.res.rows[s.sel] else null;
+        var path: [files.max_path]u8 = undefined;
+        var path_len: usize = 0;
+        if (was) |r| if (r.kind == .digup_hit) {
+            const p = s.dug.found.entries[r.file].path();
+            @memcpy(path[0..p.len], p);
+            path_len = p.len;
+        };
+        s.dug.replace(found);
+        // Google and handoff rows keep the same selection as hits arrive.
+        s.answered(s.query.text(), &s.web);
+        if (was) |r| if (r.kind == .digup_hit) {
+            s.sel = 0;
+            for (s.res.slice(), 0..) |now, i| {
+                if (now.kind == .digup_hit and std.mem.eql(u8, s.dug.found.entries[now.file].path(), path[0..path_len])) {
+                    s.sel = i;
+                    break;
+                }
+            }
+        };
+    }
+
+    /// A real file behind a row; extension commands are not app bundles.
+    pub fn filePath(s: *const Nanolight, r: Row) ?[]const u8 {
+        const path = switch (r.kind) {
+            .app => s.index.apps.items[r.app].path,
+            .file => s.found.entries[r.file].path(),
+            .digup_hit => s.dug.found.entries[r.file].path(),
+            else => return null,
+        };
+        return if (path.len > 0 and path[0] == '/') path else null;
+    }
 
     fn list(s: *Nanolight, c: *ui.Context, p: Palette) void {
         const box = ui.div(c).column().wFull().p(list_pad);
@@ -402,6 +455,7 @@ pub const Nanolight = struct {
         const big = r.kind == .calc;
         const d = ui.div(c).row().wFull().h(if (big) calc_h else row_h).px(10).gap(12).itemsCenter().control();
         defer d.end();
+        s.row_ids[i] = d.id();
         if (d.clicked()) {
             s.sel = i;
             s.activate(c);
@@ -422,6 +476,17 @@ pub const Nanolight = struct {
                 ui.text(c, "System Settings", .{ .size = 12, .color = p.sub.alpha(0.8) });
             },
             .file => files_view.row(s, c, p, i, r),
+            .digup_hit => {
+                const e = &s.dug.found.entries[r.file];
+                if (digup.email(e.path())) |m| {
+                    ui.text(c, m.subject, .{ .size = 13.5, .weight = .medium, .color = p.text.alpha(0.82), .truncate = .ellipsis });
+                    ui.textf(c, .{ .size = 12, .color = p.sub.alpha(0.8), .truncate = .ellipsis }, "Email · {s} · {s}", .{ m.account, m.date });
+                } else {
+                    ui.text(c, e.name(), .{ .size = 13.5, .weight = .medium, .color = p.text.alpha(0.82), .truncate = .ellipsis });
+                    var buf: [files.max_path]u8 = undefined;
+                    ui.textf(c, .{ .size = 12, .color = p.sub.alpha(0.8), .truncate = .ellipsis }, "{s} · {s}", .{ s.dug.kind(r.file), files.parent(&buf, e.path()) });
+                }
+            },
             .settings => {
                 ui.text(c, "SamSearch Settings", .{ .size = 13.5, .weight = .medium, .color = p.text });
                 ui.text(c, "Shortcut, sync, updates", .{ .size = 12, .color = p.sub.alpha(0.8) });
@@ -452,7 +517,7 @@ pub const Nanolight = struct {
         }
         ui.spacer(c);
         if (i == s.sel) {
-            ui.text(c, if (r.kind == .app or r.kind == .file or r.kind == .settings or r.kind == .pane) "Open" else "Go", .{ .size = 12, .weight = .medium, .color = p.sub });
+            ui.text(c, if (r.kind == .app or r.kind == .file or r.kind == .digup_hit or r.kind == .settings or r.kind == .pane) "Open" else "Go", .{ .size = 12, .weight = .medium, .color = p.sub });
             ui.kbd(c, "↩");
         } else if (s.res.number(i)) |num| ui.textf(c, .{ .size = 12, .weight = .medium, .color = p.sub.alpha(0.5), .tabular = true }, "{s}{d}", .{ results.mod, num });
     }
@@ -472,6 +537,15 @@ pub const Nanolight = struct {
             return;
         };
         if (r.kind == .file) return files_view.tile(s, c, p, r);
+        if (r.kind == .digup_hit) {
+            const e = &s.dug.found.entries[r.file];
+            if (e.png.len > 0) {
+                const box = ui.div(c).size(26, 26).center();
+                defer box.end();
+                _ = ui.image(c, .{ .key = e.path(), .bytes = e.png, .max_width = 26, .max_height = 26, .radius = 0, .scale = 1 });
+                return;
+            }
+        }
         const big = r.kind == .calc;
         const side: f32 = if (big) 34 else 26;
         const box = ui.div(c).size(side, side).rounded(if (big) 9 else 7).bg(p.tile).center();
@@ -563,6 +637,7 @@ pub const Nanolight = struct {
                 s.go(s.index.apps.items[r.app].path);
             },
             .file => s.go(s.found.entries[r.file].path()),
+            .digup_hit => s.go(s.dug.found.entries[r.file].path()),
             .quick_ask, .digup, .codes => s.page(r.kind, s.query.text(), true),
             .new_thread => s.go(results.url(&s.url_buf, .new_thread, s.query.text())),
             .search_web => s.search(s.query.text(), !s.searches_out),

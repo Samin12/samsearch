@@ -36,6 +36,7 @@ pub fn filesAnswered(s: *Nanolight, typed: []const u8, found: *files.List) void 
             .app, .pane => now.app == r.app,
             .file => std.mem.eql(u8, s.found.entries[now.file].path(), path[0..path_len]),
             .suggest => now.web == r.web,
+            .digup_hit => now.file == r.file,
             else => true,
         };
         if (same) {

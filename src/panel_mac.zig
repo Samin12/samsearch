@@ -7,6 +7,7 @@ const std = @import("std");
 const nanoui = @import("nanoui");
 const objc = nanoui.objc;
 const view = @import("view.zig");
+const position = @import("panel_position.zig");
 
 /// The system's glass under the panel, which the window's views keep.
 var glass: ?objc.Object = null;
@@ -26,9 +27,12 @@ pub fn setup(app: *nanoui.App, w: *nanoui.Window, s: *view.Nanolight, h: f32) vo
     s.window_fades = true;
     objc.msg(void, w.nswindow, "setHasShadow:", .{objc.NO});
     glass = backdrop(w, 18, h);
+    // Live hides on resign instead: a native file drag must finish first.
+    w.title_bar = .default;
+    objc.msg(void, w.nswindow, "setMovable:", .{objc.YES});
 }
 
-/// A fifth of the way down the main screen, centered.
+/// The saved spot on the main screen, else a fifth of the way down, centered.
 pub fn place(w: *nanoui.Window) void {
     const screen = objc.msg(?objc.Object, objc.class("NSScreen"), "mainScreen", .{}) orelse return;
     const f = objc.msg(objc.CGRect, screen, "frame", .{});
@@ -37,7 +41,15 @@ pub fn place(w: *nanoui.Window) void {
     const ph = objc.msg(objc.CGRect, primary, "frame", .{}).size.height;
     const top = ph - (f.origin.y + f.size.height);
     // The panel there; the window is the shadow's margin bigger.
-    w.setPosition(f.origin.x + (f.size.width - view.width) / 2 - view.shadow_margin, top + f.size.height * 0.2 - view.shadow_margin);
+    const visible = objc.msg(objc.CGRect, screen, "visibleFrame", .{});
+    var id_buf: [64]u8 = undefined;
+    const saved = if (screenId(screen, &id_buf)) |id| position.load(nanoui.kv.standard(), w.app.gpa, id, visible.size.width, visible.size.height) else null;
+    if (saved) |p| {
+        objc.msg(void, w.nswindow, "setFrameTopLeftPoint:", .{objc.CGPoint{
+            .x = visible.origin.x + p.x - view.shadow_margin,
+            .y = visible.origin.y + visible.size.height - p.y + view.shadow_margin,
+        }});
+    } else w.setPosition(f.origin.x + (f.size.width - view.width) / 2 - view.shadow_margin, top + f.size.height * 0.2 - view.shadow_margin);
     // Unseen as it orders in: it still holds the frame it hid with, until
     // the next one is drawn (issue #9). `shown` fades it in.
     objc.msg(void, w.nswindow, "setAlphaValue:", .{@as(f64, 0)});
@@ -112,4 +124,48 @@ fn backdrop(w: *nanoui.Window, radius: f64, height: f32) ?objc.Object {
 fn glassFrame(h: f32) objc.CGRect {
     const m = view.shadow_margin;
     return .{ .origin = .{ .x = m, .y = m }, .size = .{ .width = view.width, .height = h } };
+}
+
+/// The display's identity, independent of its place among the screens.
+fn screenId(screen: objc.Object, buf: []u8) ?[]const u8 {
+    const info = objc.msg(objc.Object, screen, "deviceDescription", .{});
+    const number = objc.msg(objc.Object, info, "objectForKey:", .{objc.nsString("NSScreenNumber")});
+    const uuid = CGDisplayCreateUUIDFromDisplayID(objc.msg(u32, number, "unsignedIntValue", .{})) orelse return null;
+    defer CFRelease(uuid);
+    const string = CFUUIDCreateString(null, uuid) orelse return null;
+    defer CFRelease(string);
+    const bytes = objc.fromNSString(string);
+    if (bytes.len == 0 or bytes.len > buf.len) return null;
+    @memcpy(buf[0..bytes.len], bytes);
+    return buf[0..bytes.len];
+}
+
+extern "c" fn CGDisplayCreateUUIDFromDisplayID(display: u32) ?objc.Object;
+extern "c" fn CFUUIDCreateString(allocator: ?*anyopaque, uuid: objc.Object) ?objc.Object;
+extern "c" fn CFRelease(object: objc.Object) void;
+
+/// Called after AppKit has finished moving the window.
+pub fn remember(w: *nanoui.Window) void {
+    const frame = objc.msg(objc.CGRect, w.nswindow, "frame", .{});
+    // The clear part of the tall window may extend onto another display.
+    const at: objc.CGPoint = .{ .x = frame.origin.x + view.shadow_margin + view.width / 2, .y = frame.origin.y + frame.size.height - view.shadow_margin - 1 };
+    const screens = objc.msg(objc.Object, objc.class("NSScreen"), "screens", .{});
+    const count = objc.msg(objc.NSUInteger, screens, "count", .{});
+    var chosen: ?objc.Object = null;
+    for (0..count) |i| {
+        const screen = objc.msg(objc.Object, screens, "objectAtIndex:", .{@as(objc.NSUInteger, i)});
+        const f = objc.msg(objc.CGRect, screen, "frame", .{});
+        if (at.x >= f.origin.x and at.x < f.origin.x + f.size.width and at.y >= f.origin.y and at.y < f.origin.y + f.size.height) {
+            chosen = screen;
+            break;
+        }
+    }
+    const screen = chosen orelse return;
+    const visible = objc.msg(objc.CGRect, screen, "visibleFrame", .{});
+    var id_buf: [64]u8 = undefined;
+    const id = screenId(screen, &id_buf) orelse return;
+    position.save(nanoui.kv.standard(), w.app.gpa, id, .{
+        .x = frame.origin.x + view.shadow_margin - visible.origin.x,
+        .y = visible.origin.y + visible.size.height - (frame.origin.y + frame.size.height - view.shadow_margin),
+    });
 }

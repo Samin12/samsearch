@@ -1,5 +1,6 @@
 //! What the panel lists for a query, in order: the answer when it is math,
-//! the apps that match it (or, with no query, suggestions), then Google:
+//! the apps that match it (or, with no query, suggestions), strong DigUp
+//! hits, then Google:
 //! a search for exactly what is typed, first, and Google's completions of
 //! it under that, a key or two away; last, Quick Ask, a new T3 thread,
 //! and DigUp. With no app or answer, Return searches what was typed
@@ -22,6 +23,7 @@ pub const Kind = enum {
     calc,
     app,
     file,
+    digup_hit,
     quick_ask,
     new_thread,
     digup,
@@ -40,6 +42,7 @@ pub const Kind = enum {
             .calc => "Calculator",
             .app => "Application",
             .file => "File",
+            .digup_hit => "DigUp",
             .settings => "SamSearch",
             .pane => "System Settings",
             .quick_ask, .new_thread, .digup, .codes => "Ask & Search",
@@ -52,7 +55,7 @@ pub const Kind = enum {
         return switch (k) {
             .calc => "Copy Answer",
             .app => "Open Application",
-            .file => "Open",
+            .file, .digup_hit => "Open",
             .settings => "Open Settings",
             .pane => "Open in System Settings",
             .quick_ask => "Ask",
@@ -68,6 +71,7 @@ pub const Kind = enum {
             .calc => "Calculator",
             .app => if (suggested) "Suggestions" else "Applications",
             .file => "Files",
+            .digup_hit => "DigUp",
             .settings => "SamSearch",
             .pane => "System Settings",
             .search_web, .suggest => "Google",
@@ -118,6 +122,11 @@ pub const Results = struct {
     /// completions (`web`), or
     /// `suggestions` when the query is empty.
     pub fn build(r: *Results, query_in: []const u8, ix: *const Index, suggestions: []const u32, web: []const []const u8, found: *const files.List) void {
+        r.buildWithDigup(query_in, ix, suggestions, web, found, 0);
+    }
+
+    /// DigUp uses only the room left for completions, including its head.
+    pub fn buildWithDigup(r: *Results, query_in: []const u8, ix: *const Index, suggestions: []const u32, web: []const []const u8, found: *const files.List, digup_count: usize) void {
         const boost = ix.launches.items;
         r.n = 0;
         const query = std.mem.trim(u8, query_in, " ");
@@ -174,8 +183,12 @@ pub const Results = struct {
         // The search for what was typed, its completions (as many as leave
         // room for the rest), then Quick Ask, T3 and DigUp.
         const room = limit -| r.n -| handoffs -| @as(usize, @intFromBool(codes));
+        const head_cost: usize = @intFromBool(heads >= 3);
+        const hits = @min(digup_count, @import("digup.zig").max_rows, room -| head_cost);
+        for (0..hits) |i| r.push(.{ .kind = .digup_hit, .file = @intCast(i) });
+        const web_room = room -| hits -| (if (hits > 0) head_cost else 0);
         r.push(.{ .kind = .search_web });
-        for (0..@min(web.len, max_web, room)) |i| r.push(.{ .kind = .suggest, .web = @intCast(i) });
+        for (0..@min(web.len, max_web, web_room)) |i| r.push(.{ .kind = .suggest, .web = @intCast(i) });
         if (codes) r.push(.{ .kind = .codes });
         r.push(.{ .kind = .quick_ask });
         r.push(.{ .kind = .new_thread });
@@ -254,7 +267,7 @@ pub fn url(buf: []u8, kind: Kind, query: []const u8) []const u8 {
         .digup => "http://127.0.0.1:47213/digup?q=",
         .codes => return "http://127.0.0.1:47213/codes",
         .search_web, .suggest => "https://www.google.com/search?q=",
-        .calc, .app, .file, .settings, .pane => return "",
+        .calc, .app, .file, .digup_hit, .settings, .pane => return "",
     };
     return queryUrl(buf, base, query);
 }
