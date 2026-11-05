@@ -85,6 +85,12 @@ Press **⌘3** (or pick **Search DigUp**) to search your Mac by meaning with Dig
 
 ↑↓ to move · ↵ opens · ⌘R shows it in Finder · ⇧⌘C copies the path.
 
+## ⌁ 2FA codes
+
+Type **2fa**, **otp**, **code**, **codes**, **verification** or **verify** and pick **Find 2FA codes**. Recent codes from both Gmail accounts and Messages appear in the panel, newest first. ↑↓ to move · ↵ or a click copies just the code · ⌘1–⌘9 copies directly. Ask, T3 and DigUp keep their usual ⌘1–⌘3 in the launcher.
+
+It checks the last 30 minutes and refreshes every five seconds for two minutes. **Show last 24h** reaches further back. Gmail uses `~/.local/bin/composio`, with the `aianswer` and `personal` accounts connected. For SMS and iMessage, allow **SamSearch** in **System Settings → Privacy & Security → Full Disk Access**. A source that needs attention says so; the others still work.
+
 ## How it works
 
 <p align="center"><img src=".github/assets/how-it-works.png" alt="How SamSearch works: the launcher and your screen feed three rows, Ask (Quick Ask answers in the panel with GitHub, Honcho, DigUp and Chrome tools), New T3 thread, and Search DigUp" width="100%"></p>
@@ -94,7 +100,7 @@ SamSearch is the launcher (`src/`, Zig). Its three rows talk to **Quick Ask** (`
 | Folder | What's inside |
 | --- | --- |
 | `src/` | The launcher: rows, panel, in-panel pages, Raycast extensions (from Nanolight) |
-| `quickask/` | The helper (bundled into the app by `macos/install.sh`): `main.swift` (server, screen context, Haiku and its tools, DigUp, T3), `ask.html`, `digup.html` |
+| `quickask/` | The helper (bundled into the app by `macos/install.sh`): `main.swift` (server, screen context, Haiku and its tools, DigUp, T3), `ask.html`, `digup.html`, `codes.html` |
 | `extensions/quick-ask/` | Quick Ask and New T3 Thread as Raycast-style commands |
 | `docs/reverse-engineering/` | How the closed Nanolight 0.2.6 binary was taken apart with REA and Rizin before its source turned up |
 
@@ -153,6 +159,9 @@ Syncing goes through your Codegraff account, so [Codegraff's terms](https://code
 You need Zig 0.17.1 and Xcode or the Command Line Tools.
 
 ```sh
+QUICKASK_NO_START=1 QUICKASK_NO_REGISTER=1 QUICKASK_APP=/tmp/SamSearch-Codes/QuickAsk.app sh quickask/build.sh
+/tmp/SamSearch-Codes/QuickAsk.app/Contents/MacOS/QuickAsk --selftest-codes
+# QUICKASK_PORT=47214 .../QuickAsk --serve-codes runs just the server for a local check.
 zig build test      # search, math, suggestions and the panel, through nanoui's Tester
 zig build run       # build and open it
 zig build app       # zig-out/SamSearch.app, for /Applications

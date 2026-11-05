@@ -25,6 +25,7 @@ pub const Kind = enum {
     quick_ask,
     new_thread,
     digup,
+    codes,
     search_web,
     /// One of Google's completions (`Row.web`).
     suggest,
@@ -41,7 +42,7 @@ pub const Kind = enum {
             .file => "File",
             .settings => "SamSearch",
             .pane => "System Settings",
-            .quick_ask, .new_thread, .digup => "Ask & Search",
+            .quick_ask, .new_thread, .digup, .codes => "Ask & Search",
             .search_web, .suggest => "Web",
         };
     }
@@ -57,6 +58,7 @@ pub const Kind = enum {
             .quick_ask => "Ask",
             .new_thread => "Start T3 Thread",
             .digup => "Search DigUp",
+            .codes => "Find 2FA codes",
             .search_web, .suggest => "Search Google",
         };
     }
@@ -69,7 +71,7 @@ pub const Kind = enum {
             .settings => "SamSearch",
             .pane => "System Settings",
             .search_web, .suggest => "Google",
-            .quick_ask, .new_thread, .digup => "Ask & Search",
+            .quick_ask, .new_thread, .digup, .codes => "Ask & Search",
         };
     }
 };
@@ -147,7 +149,8 @@ pub const Results = struct {
         const heads: usize = 2 + @as(usize, @intFromBool(n > 0)) + @as(usize, @intFromBool(np > 0)) +
             @as(usize, @intFromBool(settings)) + @as(usize, @intFromBool(found.n > 0));
         const limit = max_rows -| (heads -| 3);
-        const fixed = handoffs + @as(usize, @intFromBool(settings));
+        const codes = isCodes(query);
+        const fixed = handoffs + @as(usize, @intFromBool(codes)) + @as(usize, @intFromBool(settings));
         const first_pane: usize = @intFromBool(np > 0);
         const file_row: usize = @intFromBool(found.n > 0);
         // Apps come first. Panes and files are sure of a row each and take
@@ -170,9 +173,10 @@ pub const Results = struct {
         };
         // The search for what was typed, its completions (as many as leave
         // room for the rest), then Quick Ask, T3 and DigUp.
-        const room = limit -| r.n -| handoffs;
+        const room = limit -| r.n -| handoffs -| @as(usize, @intFromBool(codes));
         r.push(.{ .kind = .search_web });
         for (0..@min(web.len, max_web, room)) |i| r.push(.{ .kind = .suggest, .web = @intCast(i) });
+        if (codes) r.push(.{ .kind = .codes });
         r.push(.{ .kind = .quick_ask });
         r.push(.{ .kind = .new_thread });
         r.push(.{ .kind = .digup });
@@ -184,6 +188,16 @@ pub const Results = struct {
         const keys = [_][]const u8{ "设置", "偏好设置", "系统设置", "samsearch 设置" };
         const q = std.mem.trim(u8, query, " ");
         for (keys) |k| if (std.mem.eql(u8, q, k)) return true;
+        return false;
+    }
+
+    /// A code request starts with one of these words, never part of one.
+    fn isCodes(query: []const u8) bool {
+        var words = std.mem.tokenizeAny(u8, query, " \t\r\n:?!");
+        const first = words.next() orelse return false;
+        for ([_][]const u8{ "2fa", "otp", "code", "codes", "verification", "verify" }) |key| {
+            if (std.ascii.eqlIgnoreCase(first, key)) return true;
+        }
         return false;
     }
 
@@ -238,6 +252,7 @@ pub fn url(buf: []u8, kind: Kind, query: []const u8) []const u8 {
         .quick_ask => "http://127.0.0.1:47213/ask?q=",
         .new_thread => "quickask://t3-thread-create?q=",
         .digup => "http://127.0.0.1:47213/digup?q=",
+        .codes => return "http://127.0.0.1:47213/codes",
         .search_web, .suggest => "https://www.google.com/search?q=",
         .calc, .app, .file, .settings, .pane => return "",
     };
@@ -442,4 +457,34 @@ test "Ask, T3 and DigUp are always ⌘1, ⌘2, ⌘3; the rest count on from ⌘4
     try t.expectEqual(@as(?u8, 1), r.number(0));
     r.build("", &ix, &.{ 2, 0 }, &.{}, &.{});
     try t.expectEqual(@as(?usize, 1), r.rowFor(2));
+}
+
+test "2FA codes appear only for a leading code request, with the fixed handoff keys" {
+    const t = std.testing;
+    var ix = try testIndex(t.allocator, &.{ "Code", "Codec", "Code Editor", "Code Runner", "Code Studio", "Codes" });
+    defer ix.deinit();
+    var r: Results = .{};
+    for ([_][]const u8{ "2fa", "OTP", "code", "codes", "Verification", "verify", " 2FA code ", "codes for Google", "verify: login" }) |q| {
+        r.build(q, &ix, &.{}, &.{ "code one", "code two", "code three", "code four" }, &.{});
+        var count: usize = 0;
+        for (r.slice(), 0..) |row, i| if (row.kind == .codes) {
+            count += 1;
+            try t.expectEqualStrings("Ask & Search", r.section(i).?);
+            if (r.number(i)) |d| try t.expectEqual(@as(?usize, i), r.rowFor(d));
+        };
+        try t.expectEqual(@as(usize, 1), count);
+        try t.expect(r.n <= max_rows);
+        try t.expectEqual(Kind.quick_ask, r.rows[r.rowFor(1).?].kind);
+        try t.expectEqual(Kind.new_thread, r.rows[r.rowFor(2).?].kind);
+        try t.expectEqual(Kind.digup, r.rows[r.rowFor(3).?].kind);
+    }
+    for ([_][]const u8{ "", "codec", "coding", "decode", "verificationary", "find code", "my otp", "safari" }) |q| {
+        r.build(q, &ix, &.{}, &.{}, &.{});
+        for (r.slice()) |row| try t.expect(row.kind != .codes);
+    }
+    r.build("otp", &ix, &.{}, &.{}, &.{});
+    try t.expectEqual(Kind.codes, r.rows[r.rowFor(5).?].kind);
+    var buf: [128]u8 = undefined;
+    try t.expectEqualStrings("http://127.0.0.1:47213/codes", url(&buf, .codes, "2fa code"));
+    try t.expectEqualStrings("Find 2FA codes", Kind.codes.action());
 }

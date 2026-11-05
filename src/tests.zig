@@ -589,3 +589,38 @@ test "on a PC the panel's keys are Ctrl's, and Settings says so" {
     try std.testing.expect(t.hasText("Alt Space"));
     try std.testing.expect(t.hasText("Sync Across Computers"));
 }
+
+test "2FA codes open in the panel by Return or their number, in either theme" {
+    const gpa = std.testing.allocator;
+    var ix: Index = .init(gpa);
+    defer ix.deinit();
+    for ([_]bool{ true, false }) |dark| {
+        var web: Web = .{};
+        var s: view.Nanolight = .{ .index = &ix };
+        defer s.query.deinit();
+        s.host = web.host();
+        s.reveal();
+        var t: ui.Tester = undefined;
+        try t.init(gpa, .init(&s, view.Nanolight.view), .{ .width = view.width, .height = view.max_height, .dark = dark });
+        defer t.deinit();
+        t.settle(1);
+        press(&t, &.{.{ .insert = "2fa code" }});
+        try std.testing.expect(t.hasText("Find 2FA codes"));
+        _ = t.shortcut(.{ .key = ui.Shortcut.down });
+        try std.testing.expectEqual(results.Kind.codes, s.res.rows[s.sel].kind);
+        press(&t, &.{.{ .command = .insert_newline }});
+        try std.testing.expectEqualStrings("http://127.0.0.1:47213/codes", web.page[0..web.page_len.?]);
+        try std.testing.expect(s.previewing and !web.probe.hidden);
+        t.settle(1);
+        try std.testing.expect(!t.hasText("Open in Browser"));
+        _ = t.shortcut(.{ .key = ui.Shortcut.enter, .cmd = true });
+        try std.testing.expectEqual(@as(usize, 0), web.probe.opened_len);
+        _ = t.shortcut(.{ .key = ui.Shortcut.escape });
+        try std.testing.expect(web.page_len == null);
+        try std.testing.expect(t.shortcut(.{ .key = '5', .cmd = true }));
+        try std.testing.expectEqualStrings("http://127.0.0.1:47213/codes", web.page[0..web.page_len.?]);
+        try std.testing.expectEqual(results.Kind.quick_ask, s.res.rows[s.res.rowFor(1).?].kind);
+        try std.testing.expectEqual(results.Kind.new_thread, s.res.rows[s.res.rowFor(2).?].kind);
+        try std.testing.expectEqual(results.Kind.digup, s.res.rows[s.res.rowFor(3).?].kind);
+    }
+}

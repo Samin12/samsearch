@@ -4,6 +4,7 @@
 //   /ask?q=…      Haiku (through CLIProxyAPI) answers with what you're looking at: a screenshot of the
 //                 window behind the launcher plus its text (the open browser tab, or OCR).
 //   /digup?q=…    DigUp's results for your files, screenshots, email and Drive.
+//   /codes        Recent verification codes from both inboxes and Messages.
 // And quickask:// links, for rows that hand off rather than show a page:
 //   quickask://t3-thread-create?q=…   a new T3 Code thread with default settings, then jump to it
 //   quickask://answer?q=…             the same answer page in a floating window
@@ -14,7 +15,7 @@ import Vision
 import WebKit
 
 let home = FileManager.default.homeDirectoryForCurrentUser.path
-let PORT: UInt16 = 47213
+let PORT: UInt16 = ProcessInfo.processInfo.environment["QUICKASK_PORT"].flatMap(UInt16.init).flatMap { $0 > 0 ? $0 : nil } ?? 47213
 let T3 = home + "/.t3/bin/t3"
 let PROJECT = home + "/SaminOS"
 let MODEL = "claude-haiku-5-5"
@@ -676,13 +677,13 @@ final class Connection {
         let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] ?? [:]
 
         switch (method, path) {
-        case ("GET", "/ask"), ("GET", "/digup"):
-            let page = path == "/ask" ? "ask.html" : "digup.html"
+        case ("GET", "/ask"), ("GET", "/digup"), ("GET", "/codes"):
+            let page = path == "/ask" ? "ask.html" : path == "/digup" ? "digup.html" : "codes.html"
             guard let url = Bundle.main.url(forResource: page, withExtension: nil),
                   var html = try? String(contentsOf: url, encoding: .utf8) else { return send("404 Not Found", "text/plain", Data()) }
             // Ask captures the screen now, while the window you were in is still in front.
             let sid = path == "/ask" ? Sessions.shared.capture() : ""
-            Knowledge.shared.refresh()
+            if path != "/codes" { Knowledge.shared.refresh() }
             let boot: [String: Any] = ["q": query["q"] ?? "", "sid": sid, "floating": query["floating"] == "1", "home": home]
             html = html.replacingOccurrences(of: "/*BOOT*/", with: "window.BOOT = \(String(decoding: jsonData(boot), as: UTF8.self));")
             send("200 OK", "text/html; charset=utf-8", Data(html.utf8))
@@ -710,6 +711,11 @@ final class Connection {
             Sessions.shared.screen(json["sid"] as? String ?? "") { [self] s in
                 let err = startT3(taskForT3(q, history: history, screen: s), title: json["title"] as? String ?? q)
                 send("200 OK", "application/json", jsonData(err.map { ["error": $0] } ?? ["ok": true]))
+            }
+        case ("GET", "/api/codes"):
+            let minutes = min(1440, max(1, Int(query["minutes"] ?? "30") ?? 30))
+            Codes.shared.search(minutes) { [self] reply in
+                send("200 OK", "application/json", jsonData(reply))
             }
         case ("POST", "/api/digup"):
             DigUp.shared.search(json["q"] as? String ?? "") { [self] reply in
@@ -742,9 +748,9 @@ final class Connection {
             let text = json["text"] as? String ?? ""
             DispatchQueue.main.async {
                 NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(text, forType: .string)
+                let ok = NSPasteboard.general.setString(text, forType: .string)
+                self.send("200 OK", "application/json", jsonData(["ok": ok]))
             }
-            send("200 OK", "application/json", jsonData(["ok": true]))
         default:
             send("404 Not Found", "text/plain", Data())
         }
@@ -922,6 +928,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func application(_ application: NSApplication, open urls: [URL]) {
         urls.forEach(route)
     }
+}
+
+// Tests and a server-only check need no app, screen capture or background tools.
+if CommandLine.arguments.contains("--selftest-codes") { selftestCodes(); exit(0) }
+if CommandLine.arguments.contains("--serve-codes") {
+    do {
+        let server = try Server()
+        withExtendedLifetime(server) { RunLoop.main.run() }
+    } catch { fputs("server didn't start: \(error)\n", stderr); exit(1) }
+    exit(0)
 }
 
 let app = NSApplication.shared

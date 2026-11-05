@@ -201,6 +201,7 @@ pub const Nanolight = struct {
                 ui.text(c, switch (s.preview_kind) {
                     .quick_ask => "Asking…",
                     .digup => "Searching DigUp…",
+                    .codes => "Looking for codes…",
                     else => "Searching Google…",
                 }, .{ .size = 13, .color = p.sub.alpha(0.8) });
             } else if (s.res.n > 0) {
@@ -425,6 +426,10 @@ pub const Nanolight = struct {
                 ui.text(c, "SamSearch Settings", .{ .size = 13.5, .weight = .medium, .color = p.text });
                 ui.text(c, "Shortcut, sync, updates", .{ .size = 12, .color = p.sub.alpha(0.8) });
             },
+            .codes => {
+                ui.text(c, "Find 2FA codes", .{ .size = 13.5, .weight = .medium, .color = p.text });
+                ui.text(c, "Gmail and Messages", .{ .size = 12, .color = p.sub.alpha(0.8) });
+            },
             .suggest => {
                 const w = s.web.get(r.web);
                 ui.richText(c, w, s.added(i, w, p), .{ .size = 13.5, .color = p.text.alpha(0.72), .truncate = .ellipsis });
@@ -476,6 +481,7 @@ pub const Nanolight = struct {
             .quick_ask => "sparkles",
             .new_thread => "terminal",
             .digup => "doc.text.magnifyingglass",
+            .codes => "lock",
             .search_web => "globe",
             .suggest => "magnifyingglass",
             .settings => "gearshape",
@@ -523,7 +529,7 @@ pub const Nanolight = struct {
             ui.text(c, "Settings", .{ .size = 1, .color = p.sub.alpha(0) });
         }
         if (s.previewing) {
-            if (s.preview_kind != .digup) {
+            if (s.preview_kind != .digup and s.preview_kind != .codes) {
                 ui.text(c, if (s.preview_kind == .quick_ask) "Open Answer Window" else "Open in Browser", .{ .size = 12, .weight = .medium, .color = p.text.alpha(0.85) });
                 ui.kbd(c, results.mod ++ "↩");
                 ui.div(c).w(1).h(14).bg(p.hair).end();
@@ -557,7 +563,7 @@ pub const Nanolight = struct {
                 s.go(s.index.apps.items[r.app].path);
             },
             .file => s.go(s.found.entries[r.file].path()),
-            .quick_ask, .digup => s.page(r.kind, s.query.text(), true),
+            .quick_ask, .digup, .codes => s.page(r.kind, s.query.text(), true),
             .new_thread => s.go(results.url(&s.url_buf, .new_thread, s.query.text())),
             .search_web => s.search(s.query.text(), !s.searches_out),
             .settings => s.openSettings(),
@@ -606,7 +612,7 @@ pub const Nanolight = struct {
         if (!s.previewing) return;
         switch (s.preview_kind) {
             .quick_ask => s.go(s.preview_answer),
-            .digup => {},
+            .digup, .codes => {},
             .search_web => s.go(current_url orelse s.preview_url),
             else => {},
         }
