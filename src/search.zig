@@ -330,7 +330,6 @@ pub const Ranked = struct {
 };
 
 const apps = @import("apps.zig");
-const App = apps.App;
 const Index = apps.Index;
 
 /// The best `out.len` of `names` for `query`, best first, with `boost`
@@ -344,23 +343,24 @@ pub fn rankNames(query: []const u8, names: []const []const u8, pinyin: []const [
     return rankListed(query, names, pinyin, null, boost, out);
 }
 
-/// Ranks apps using each entry's display name and optional pinyin key.
+/// Ranks apps using each entry's display name and optional pinyin key,
+/// the app last opened for this query first.
 pub fn rankApps(query: []const u8, ix: *const Index, boost: []const u16, out: []Ranked) usize {
-    return rankListed(query, ix.names.items, &.{}, ix.apps.items, boost, out);
+    return rankListed(query, ix.names.items, &.{}, ix, boost, out);
 }
 
 fn rankListed(
     query: []const u8,
     names: []const []const u8,
     pinyin: []const []const u8,
-    apps_list: ?[]const App,
+    ix: ?*const Index,
     boost: []const u16,
     out: []Ranked,
 ) usize {
     var n: usize = 0;
     for (names, 0..) |name, i| {
         var m = score(query, name);
-        const py = if (apps_list) |list| list[i].pinyin else if (i < pinyin.len) pinyin[i] else "";
+        const py = if (ix) |x| x.apps.items[i].pinyin else if (i < pinyin.len) pinyin[i] else "";
         if (py.len > 0) {
             if (scoreAscii(query, py)) |mp| {
                 var via = mp;
@@ -372,6 +372,7 @@ fn rankListed(
         const hit = m orelse continue;
         var scored = hit;
         if (i < boost.len) scored.score += @min(@as(i32, boost[i]) * 25, 250);
+        if (ix) |x| scored.score += x.pickBoost(query, i);
         const r: Ranked = .{ .index = @intCast(i), .match = scored };
         if (n < out.len) {
             out[n] = r;

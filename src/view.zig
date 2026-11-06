@@ -634,6 +634,7 @@ pub const Nanolight = struct {
             },
             .app => {
                 s.index.opened(r.app, s.kv);
+                s.index.picked(s.query.text(), r.app, s.kv);
                 s.go(s.index.apps.items[r.app].path);
             },
             .file => s.go(s.found.entries[r.file].path()),

@@ -70,6 +70,8 @@ pub const Index = struct {
     names: std.ArrayList([]const u8) = .empty,
     /// Times each was opened.
     launches: std.ArrayList(u16) = .empty,
+    /// The app last opened for each query typed ("cal" → Notion Calendar).
+    picks: std.ArrayList(Pick) = .empty,
     icons: std.AutoHashMapUnmanaged(u32, ?Icon) = .empty,
     /// Listed with an empty query before anything was opened.
     starters: []const []const u8 = default_starters,
@@ -85,6 +87,7 @@ pub const Index = struct {
         ix.apps.deinit(ix.gpa);
         ix.names.deinit(ix.gpa);
         ix.launches.deinit(ix.gpa);
+        ix.picks.deinit(ix.gpa);
         ix.arena.deinit();
     }
 
@@ -216,6 +219,56 @@ pub const Index = struct {
         if (store) |kv| ix.save(kv);
     }
 
+    /// Remembers that `query` opened app `i`: that query, and the start of
+    /// it, put the app first from now on.
+    pub fn picked(ix: *Index, query_in: []const u8, i: u32, store: ?nanoui.kv.Store) void {
+        const query = std.mem.trim(u8, query_in, " ");
+        if (query.len == 0 or query.len > max_pick or std.mem.indexOfAny(u8, query, "\t\n") != null) return;
+        ix.remember(query, ix.apps.items[i].path) catch return;
+        if (store) |kv| ix.savePicks(kv);
+    }
+
+    fn remember(ix: *Index, query: []const u8, path: []const u8) !void {
+        const a = ix.arena.allocator();
+        for (ix.picks.items) |*p| if (std.ascii.eqlIgnoreCase(p.query, query)) {
+            if (!std.mem.eql(u8, p.path, path)) p.path = try a.dupe(u8, path);
+            return;
+        };
+        try ix.picks.append(ix.gpa, .{ .query = try std.ascii.allocLowerString(a, query), .path = try a.dupe(u8, path) });
+    }
+
+    /// What the picks add to app `i` for `query`: most when it is the very
+    /// query the app was opened with, less when it is the start of one.
+    pub fn pickBoost(ix: *const Index, query_in: []const u8, i: usize) i32 {
+        const query = std.mem.trim(u8, query_in, " ");
+        if (query.len == 0) return 0;
+        const path = ix.apps.items[i].path;
+        var best: i32 = 0;
+        for (ix.picks.items) |p| {
+            if (!std.mem.eql(u8, p.path, path) or !std.ascii.startsWithIgnoreCase(p.query, query)) continue;
+            best = @max(best, if (p.query.len == query.len) @as(i32, 600) else 400);
+        }
+        return best;
+    }
+
+    fn savePicks(ix: *Index, kv: nanoui.kv.Store) void {
+        var aw: std.Io.Writer.Allocating = .init(ix.gpa);
+        defer aw.deinit();
+        for (ix.picks.items) |p| aw.writer.print("{s}\t{s}\n", .{ p.query, p.path }) catch return;
+        kv.set(picks_key, aw.written()) catch {};
+    }
+
+    fn loadPicks(ix: *Index, store: nanoui.kv.Store) void {
+        const v = (store.get(ix.gpa, picks_key) catch null) orelse return;
+        defer ix.gpa.free(v);
+        var lines = std.mem.splitScalar(u8, v, '\n');
+        while (lines.next()) |line| {
+            const tab = std.mem.indexOfScalar(u8, line, '\t') orelse continue;
+            if (tab == 0 or tab > max_pick) continue;
+            ix.remember(line[0..tab], line[tab + 1 ..]) catch return;
+        }
+    }
+
     /// Keeps every count in `kv` (as `opened` does, and a sync after it).
     pub fn save(ix: *Index, kv: nanoui.kv.Store) void {
         var aw: std.Io.Writer.Allocating = .init(ix.gpa);
@@ -227,6 +280,11 @@ pub const Index = struct {
     /// The counts `opened` kept. Keys are app paths; older rows used
     /// display names and are still read once.
     pub fn load(ix: *Index, store: nanoui.kv.Store) void {
+        ix.loadCounts(store);
+        ix.loadPicks(store);
+    }
+
+    fn loadCounts(ix: *Index, store: nanoui.kv.Store) void {
         const v = (store.get(ix.gpa, store_key) catch null) orelse return;
         defer ix.gpa.free(v);
         var lines = std.mem.splitScalar(u8, v, '\n');
@@ -255,6 +313,11 @@ pub const Index = struct {
 };
 
 const store_key = "nanolight.launches";
+const picks_key = "samsearch.picks";
+/// Longer queries name the app well enough on their own.
+const max_pick = 32;
+
+pub const Pick = struct { query: []const u8, path: []const u8 };
 
 fn resolveLaunchKey(ix: *const Index, key: []const u8) ?u32 {
     if (ix.findPath(key)) |i| return i;
@@ -353,6 +416,34 @@ test "names are kept once, sorted, and opening one suggests it" {
     ix.launches.items[0] = 0;
     ix.load(mem.store());
     try t.expectEqual(@as(u16, 2), ix.launches.items[0]);
+}
+
+test "the app opened for a query comes first for it, and for its start" {
+    const t = std.testing;
+    var ix = Index.init(t.allocator);
+    defer ix.deinit();
+    try ix.add("Calendar", "/System/Applications/Calendar.app");
+    try ix.add("Canva", "/Applications/Canva.app");
+    try ix.add("Notion Calendar", "/Applications/Notion Calendar.app");
+    const search = @import("search.zig");
+    var out: [3]search.Ranked = undefined;
+    _ = search.rankApps("cal", &ix, ix.launches.items, &out);
+    try t.expectEqualStrings("Calendar", ix.names.items[out[0].index]);
+    var mem: nanoui.kv.Memory = .{ .gpa = t.allocator };
+    defer mem.deinit();
+    ix.picked(" Cal ", 2, mem.store());
+    _ = search.rankApps("cal", &ix, ix.launches.items, &out);
+    try t.expectEqualStrings("Notion Calendar", ix.names.items[out[0].index]);
+    _ = search.rankApps("ca", &ix, ix.launches.items, &out);
+    try t.expectEqualStrings("Notion Calendar", ix.names.items[out[0].index]);
+    // A longer query it was never opened with is left alone.
+    try t.expectEqual(@as(i32, 0), ix.pickBoost("calen", 2));
+    // Kept, and read back by a fresh index.
+    var again = Index.init(t.allocator);
+    defer again.deinit();
+    try again.add("Notion Calendar", "/Applications/Notion Calendar.app");
+    again.load(mem.store());
+    try t.expectEqual(@as(i32, 600), again.pickBoost("cal", 0));
 }
 
 test "a second look tells an app installed since from no change (#15)" {
