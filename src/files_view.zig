@@ -50,7 +50,8 @@ pub fn row(s: *Nanolight, c: *ui.Context, p: Palette, i: usize, r: Row) void {
     const e = &s.found.entries[r.file];
     ui.richText(c, e.name(), s.highlight(i, r, p), .{ .size = 13.5, .weight = .medium, .color = p.text.alpha(0.82) });
     var buf: [files.max_path]u8 = undefined;
-    ui.text(c, files.parent(&buf, e.path()), .{ .size = 12, .color = p.sub.alpha(0.8), .truncate = .ellipsis });
+    // `buf` is this call's; the frame draws the text after it returns.
+    ui.text(c, c.print("{s}", .{files.parent(&buf, e.path())}), .{ .size = 12, .color = p.sub.alpha(0.8), .truncate = .ellipsis });
     ui.text(c, if (e.folder) "Folder" else "File", .{ .size = 11.5, .color = p.sub });
 }
 
