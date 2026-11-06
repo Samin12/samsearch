@@ -11,6 +11,7 @@ test {
     _ = @import("calc.zig");
     _ = @import("results.zig");
     _ = @import("digup.zig");
+    _ = @import("gmail.zig");
     _ = @import("panel_position.zig");
     _ = @import("data_dir.zig");
     _ = @import("suggest.zig");

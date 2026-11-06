@@ -10,6 +10,7 @@ const Index = @import("apps.zig").Index;
 const results = @import("results.zig");
 const files = @import("files.zig");
 const digup = @import("digup.zig");
+const gmail = @import("gmail.zig");
 const files_view = @import("files_view.zig");
 const suggest = @import("suggest.zig");
 const text = @import("text.zig");
@@ -30,6 +31,9 @@ pub const Host = struct {
     files: ?*const fn (ctx: *anyopaque, query: []const u8) void = null,
     digup: ?*const fn (ctx: *anyopaque, query: []const u8) void = null,
     reveal: ?*const fn (ctx: *anyopaque, path: []const u8) void = null,
+    /// Opens a URL in one of Chrome's profiles (gmail.zig); without it, in
+    /// the default browser.
+    chrome: ?*const fn (ctx: *anyopaque, profile: []const u8, url: []const u8) void = null,
     /// Shows a search's page in the panel, over `webArea`; null takes it
     /// away. Without it, searches open in the browser.
     preview: ?*const fn (ctx: *anyopaque, url: ?[]const u8) void = null,
@@ -372,7 +376,7 @@ pub const Nanolight = struct {
         for (s.res.slice(), 0..) |now, i| {
             const same_row = now.kind == r.kind and switch (r.kind) {
                 .app, .pane => now.app == r.app,
-                .file, .digup_hit => now.file == r.file,
+                .file, .digup_hit, .gmail => now.file == r.file,
                 .suggest => suggest.same(s.web.get(now.web), was_text[0..was_len]),
                 else => true,
             };
@@ -491,6 +495,15 @@ pub const Nanolight = struct {
                 ui.text(c, "SamSearch Settings", .{ .size = 13.5, .weight = .medium, .color = p.text });
                 ui.text(c, "Shortcut, sync, updates", .{ .size = 12, .color = p.sub.alpha(0.8) });
             },
+            .gmail => {
+                const a = gmail.accounts[r.file];
+                const words = gmail.terms(q);
+                if (words.len > 0)
+                    ui.textf(c, .{ .size = 13.5, .weight = .medium, .color = p.text, .truncate = .ellipsis }, "Search {s} Gmail for “{s}”", .{ a.name, words })
+                else
+                    ui.textf(c, .{ .size = 13.5, .weight = .medium, .color = p.text }, "Gmail · {s}", .{a.name});
+                ui.textf(c, .{ .size = 12, .color = p.sub.alpha(0.8), .truncate = .ellipsis }, "{s} · Chrome", .{a.email});
+            },
             .codes => {
                 ui.text(c, "Find 2FA codes", .{ .size = 13.5, .weight = .medium, .color = p.text });
                 ui.text(c, "Gmail and Messages", .{ .size = 12, .color = p.sub.alpha(0.8) });
@@ -517,7 +530,7 @@ pub const Nanolight = struct {
         }
         ui.spacer(c);
         if (i == s.sel) {
-            ui.text(c, if (r.kind == .app or r.kind == .file or r.kind == .digup_hit or r.kind == .settings or r.kind == .pane) "Open" else "Go", .{ .size = 12, .weight = .medium, .color = p.sub });
+            ui.text(c, if (r.kind == .app or r.kind == .file or r.kind == .digup_hit or r.kind == .settings or r.kind == .pane or r.kind == .gmail) "Open" else "Go", .{ .size = 12, .weight = .medium, .color = p.sub });
             ui.kbd(c, "↩");
         } else if (s.res.number(i)) |num| ui.textf(c, .{ .size = 12, .weight = .medium, .color = p.sub.alpha(0.5), .tabular = true }, "{s}{d}", .{ results.mod, num });
     }
@@ -537,6 +550,12 @@ pub const Nanolight = struct {
             return;
         };
         if (r.kind == .file) return files_view.tile(s, c, p, r);
+        if (r.kind == .gmail) {
+            const box = ui.div(c).size(26, 26).center();
+            defer box.end();
+            _ = ui.image(c, .{ .key = "gmail-icon", .bytes = gmail.icon_png, .max_width = 22, .max_height = 22, .radius = 0, .scale = 2 });
+            return;
+        }
         if (r.kind == .digup_hit) {
             const e = &s.dug.found.entries[r.file];
             if (e.png.len > 0) {
@@ -644,6 +663,12 @@ pub const Nanolight = struct {
             .search_web => s.search(s.query.text(), !s.searches_out),
             .settings => s.openSettings(),
             .pane => s.go(@import("settings_panes.zig").urls[r.app]),
+            .gmail => {
+                const h = s.host orelse return;
+                const open = h.chrome orelse return s.go(gmail.url(&s.url_buf, r.file, s.query.text()));
+                open(h.ctx, gmail.accounts[r.file].profile, gmail.url(&s.url_buf, r.file, s.query.text()));
+                h.hide(h.ctx);
+            },
             .suggest => {
                 // Its words fill the field, as a search box's would.
                 s.query.set(s.web.get(r.web));

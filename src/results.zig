@@ -11,6 +11,7 @@ const search = @import("search.zig");
 const files = @import("files.zig");
 const calc = @import("calc.zig");
 const panes = @import("settings_panes.zig");
+const gmail = @import("gmail.zig");
 const mac = @import("builtin").os.tag == .macos;
 const Index = @import("apps.zig").Index;
 
@@ -35,6 +36,9 @@ pub const Kind = enum {
     settings,
     /// A pane of System Settings (`Row.app` its place in settings_panes.zig).
     pane,
+    /// A Gmail account, opened in its Chrome profile (`Row.file` its place
+    /// in gmail.zig).
+    gmail,
 
     /// The row's kind as its trailing label shows it.
     pub fn label(k: Kind) []const u8 {
@@ -45,6 +49,7 @@ pub const Kind = enum {
             .digup_hit => "DigUp",
             .settings => "SamSearch",
             .pane => "System Settings",
+            .gmail => "Gmail",
             .quick_ask, .new_thread, .digup, .codes => "Ask & Search",
             .search_web, .suggest => "Web",
         };
@@ -58,6 +63,7 @@ pub const Kind = enum {
             .file, .digup_hit => "Open",
             .settings => "Open Settings",
             .pane => "Open in System Settings",
+            .gmail => "Open in Chrome",
             .quick_ask => "Ask",
             .new_thread => "Start T3 Thread",
             .digup => "Search DigUp",
@@ -74,6 +80,7 @@ pub const Kind = enum {
             .digup_hit => "DigUp",
             .settings => "SamSearch",
             .pane => "System Settings",
+            .gmail => "Gmail",
             .search_web, .suggest => "Google",
             .quick_ask, .new_thread, .digup, .codes => "Ask & Search",
         };
@@ -155,11 +162,13 @@ pub const Results = struct {
         const np = if (settings) 0 else panes.rank(query, &pane_rows);
         // One row pays for each section head beyond the original three, so
         // the panel never grows past its tallest (view.max_height).
+        const mail = gmail.matches(query);
         const heads: usize = 2 + @as(usize, @intFromBool(n > 0)) + @as(usize, @intFromBool(np > 0)) +
-            @as(usize, @intFromBool(settings)) + @as(usize, @intFromBool(found.n > 0));
+            @as(usize, @intFromBool(settings)) + @as(usize, @intFromBool(found.n > 0)) + @as(usize, @intFromBool(mail));
         const limit = max_rows -| (heads -| 3);
         const codes = isCodes(query);
-        const fixed = handoffs + @as(usize, @intFromBool(codes)) + @as(usize, @intFromBool(settings));
+        const mail_rows: usize = if (mail) gmail.accounts.len else 0;
+        const fixed = handoffs + @as(usize, @intFromBool(codes)) + @as(usize, @intFromBool(settings)) + mail_rows;
         const first_pane: usize = @intFromBool(np > 0);
         const file_row: usize = @intFromBool(found.n > 0);
         // Apps come first. Panes and files are sure of a row each and take
@@ -168,6 +177,8 @@ pub const Results = struct {
         const app_count = @min(n, limit -| fixed -| first_pane -| file_row);
         const pane_count = @min(np, limit -| fixed -| file_row -| app_count);
         const count = @min(found.n, limit -| fixed -| app_count -| pane_count);
+        // "gmail": an inbox a row, first, so Return opens the first.
+        for (0..mail_rows) |i| r.push(.{ .kind = .gmail, .file = @intCast(i) });
         // An exact path leads, with its siblings under one Files head.
         if (found.exact) for (0..count) |i| {
             r.push(.{ .kind = .file, .file = @intCast(i), .match = found.entries[i].match });
@@ -268,6 +279,7 @@ pub fn url(buf: []u8, kind: Kind, query: []const u8) []const u8 {
         .codes => return "http://127.0.0.1:47213/codes",
         .search_web, .suggest => "https://www.google.com/search?q=",
         .calc, .app, .file, .digup_hit, .settings, .pane => return "",
+        .gmail => return gmail.url(buf, 0, query),
     };
     return queryUrl(buf, base, query);
 }
@@ -500,4 +512,24 @@ test "2FA codes appear only for a leading code request, with the fixed handoff k
     var buf: [128]u8 = undefined;
     try t.expectEqualStrings("http://127.0.0.1:47213/codes", url(&buf, .codes, "2fa code"));
     try t.expectEqualStrings("Find 2FA codes", Kind.codes.action());
+}
+
+test "gmail lists an inbox an account, first, with every handoff" {
+    const t = std.testing;
+    var ix = try testIndex(t.allocator, &.{ "Safari", "Mail", "Maps", "Pages", "Calendar", "Calculator", "FaceTime" });
+    defer ix.deinit();
+    var r: Results = .{};
+    for ([_][]const u8{ "gm", "gmail", "gmail invoice" }) |q| {
+        r.build(q, &ix, &.{}, &.{ "w1", "w2", "w3", "w4" }, &.{});
+        try t.expectEqual(Kind.gmail, r.rows[0].kind);
+        try t.expectEqual(Kind.gmail, r.rows[1].kind);
+        try t.expectEqual(@as(u8, 1), r.rows[1].file);
+        try t.expectEqualStrings("Gmail", r.section(0).?);
+        try t.expect(r.section(1) == null);
+        try t.expectEqual(Kind.digup, r.rows[r.n - 1].kind);
+        try t.expectEqual(Kind.quick_ask, r.rows[r.rowFor(1).?].kind);
+    }
+    // A full list of apps still fits under them.
+    r.build("a", &ix, &.{}, &.{}, &.{});
+    for (r.slice()) |row| try t.expect(row.kind != .gmail);
 }

@@ -96,7 +96,12 @@ pub const Live = struct {
     fn host(l: *Live) view.Host {
         const bind = @import("settings_bind.zig");
         bind.box.ctx = l;
-        return .{ .ctx = l, .open = open, .hide = hide, .resize = resize, .suggest = ask, .files = if (mac) @import("files_live.zig").askFiles else null, .digup = if (mac) @import("digup_live.zig").ask else null, .reveal = if (mac) revealFile else null, .preview = if (mac) showPage else null, .settings = &bind.box };
+        return .{ .ctx = l, .open = open, .hide = hide, .resize = resize, .suggest = ask, .files = if (mac) @import("files_live.zig").askFiles else null, .digup = if (mac) @import("digup_live.zig").ask else null, .reveal = if (mac) revealFile else null, .chrome = if (mac) openInChrome else null, .preview = if (mac) showPage else null, .settings = &bind.box };
+    }
+
+    fn openInChrome(ctx: *anyopaque, profile: []const u8, url: []const u8) void {
+        const l: *Live = @ptrCast(@alignCast(ctx));
+        @import("gmail.zig").openInChrome(l.app.io, profile, url);
     }
 
     fn revealFile(_: *anyopaque, path: []const u8) void {
