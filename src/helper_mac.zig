@@ -127,6 +127,9 @@ fn gone(tenths: usize) bool {
 }
 
 fn inspect() void {
+    // Taken first, so every way out of this check has used it: only a
+    // request made while checking (another failed page) runs one more.
+    const restart_asked = forced.swap(false, .acq_rel);
     defer {
         busy.store(false, .release);
         if (forced.load(.acquire) and !stopped.load(.acquire)) objc.dispatchMain(null, checkAgain);
@@ -136,6 +139,7 @@ fn inspect() void {
     if (stopped.load(.acquire)) return;
     const path = helper[0..helper_len];
     const fm = objc.msg(objc.Object, objc.class("NSFileManager"), "defaultManager", .{});
+    // No helper in this bundle (a bare dev build): nothing to start.
     if (objc.msg(objc.BOOL, fm, "fileExistsAtPath:", .{objc.nsString(path)}) == objc.NO) return;
     const list = applications();
     const count = objc.msg(objc.NSUInteger, list, "count", .{});
@@ -155,7 +159,7 @@ fn inspect() void {
         const launched = objc.msg(?objc.Object, app, "launchDate", .{}) orelse continue;
         if (objc.msg(f64, modified, "timeIntervalSinceDate:", .{launched}) > 0) observation = .stale;
     }
-    if (forced.swap(false, .acq_rel)) {
+    if (restart_asked) {
         observation = if (count == 0) .missing else .restart;
     } else if (observation == .healthy) {
         if (!run(&.{ "/usr/bin/curl", "--fail", "--silent", "--max-time", "2", "http://127.0.0.1:47213/health" })) observation = .failed;

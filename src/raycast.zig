@@ -169,6 +169,9 @@ pub fn findHost(gpa: std.mem.Allocator, env: *const std.process.Environ.Map) ?[]
 pub const ProcessJob = struct {
     refs: std.atomic.Value(u32) = .init(2),
     done: std.atomic.Value(bool) = .init(false),
+    /// A stop asked for while the worker waits on a process that ended its
+    /// output but kept running.
+    cancelled: std.atomic.Value(bool) = .init(false),
     term: ?std.process.Child.Term = null,
     child: std.process.Child,
     terminate: bool,
@@ -192,6 +195,20 @@ pub const ProcessJob = struct {
         return job;
     }
 
+    /// From the UI thread: stops the process (SIGTERM, then SIGKILL ~2 s
+    /// later). A no-op once it has exited. On Windows the wait can't be
+    /// interrupted, so the process is left to finish.
+    pub fn cancel(job: *ProcessJob) void {
+        job.cancelled.store(true, .release);
+    }
+
+    /// The owner lets go: with `stop`, the process is stopped too.
+    pub fn drop(job: *ProcessJob, stop_it: bool) void {
+        if (stop_it) job.cancel();
+        job.owner = null;
+        job.release();
+    }
+
     pub fn release(job: *ProcessJob) void {
         if (job.refs.fetchSub(1, .acq_rel) == 1) std.heap.page_allocator.destroy(job);
     }
@@ -203,9 +220,11 @@ pub const ProcessJob = struct {
         if (windows) {
             if (job.terminate) child.kill(worker_io) else job.term = child.wait(worker_io) catch null;
         } else if (child.id) |pid| {
-            if (job.terminate) _ = std.c.kill(pid, .TERM);
+            var signalled = job.terminate;
+            if (signalled) _ = std.c.kill(pid, .TERM);
             var status: c_int = 0;
             var ticks: usize = 0;
+            var since: usize = 0;
             while (true) {
                 const result = std.c.waitpid(pid, &status, std.c.W.NOHANG);
                 if (result == pid) {
@@ -213,9 +232,14 @@ pub const ProcessJob = struct {
                     break;
                 }
                 if (result < 0 and std.posix.errno(result) != .INTR) break;
-                // Only a stop escalates; a command that closed its output
-                // but keeps working is left to finish (EOF is not an exit).
-                if (job.terminate and ticks == 100) _ = std.c.kill(pid, .KILL);
+                // EOF is not an exit: a command that closed its output keeps
+                // working until it ends, unless a stop arrives meanwhile.
+                if (!signalled and job.cancelled.load(.acquire)) {
+                    _ = std.c.kill(pid, .TERM);
+                    signalled = true;
+                    since = ticks;
+                }
+                if (signalled and ticks - since == 100) _ = std.c.kill(pid, .KILL);
                 std.Io.sleep(worker_io, .fromMilliseconds(20), .awake) catch {};
                 ticks += 1;
             }
@@ -301,21 +325,17 @@ pub const Runner = struct {
 
     /// Ends the running command, if one is, and leaves its screen.
     pub fn stop(r: *Runner) void {
-        r.close();
-        if (r.reaping) |job| {
-            job.owner = null;
-            job.release();
-        }
+        r.close(true);
+        if (r.reaping) |job| job.drop(true);
         r.reaping = null;
         if (r.ext.open) r.ext.stop();
         r.hooks.redraw(r.hooks.ctx);
     }
 
-    fn close(r: *Runner) void {
-        if (r.reaping) |job| {
-            job.owner = null;
-            job.release();
-        }
+    /// Hands the process to a worker. `stop_it`: an explicit stop (SIGTERM);
+    /// otherwise its output ended and it may still be finishing its work.
+    fn close(r: *Runner, stop_it: bool) void {
+        if (r.reaping) |job| job.drop(stop_it);
         r.reaping = null;
         r.state = .closing;
         if (r.watch) |w| w.cancel();
@@ -335,7 +355,7 @@ pub const Runner = struct {
         if (r.line.items.len > 0) r.handle(r.line.items);
         r.line.clearRetainingCapacity();
         if (r.child) |child| {
-            r.reaping = ProcessJob.startNotify(child, true, r, completed);
+            r.reaping = ProcessJob.startNotify(child, stop_it, r, completed);
         }
         r.child = null;
         if (r.reaping == null) r.state = .stopped;
@@ -363,7 +383,11 @@ pub const Runner = struct {
     pub fn send(ctx: *anyopaque, line: []const u8) void {
         const r: *Runner = @ptrCast(@alignCast(ctx));
         if (r.state == .closing) {
-            if (std.mem.indexOf(u8, line, "\"pop\"") != null) r.ext.stop();
+            // Leaving a command still finishing its work stops it.
+            if (std.mem.indexOf(u8, line, "\"pop\"") != null) {
+                if (r.reaping) |job| job.cancel();
+                r.ext.stop();
+            }
             return;
         }
         const c = &(r.child orelse {
@@ -372,7 +396,7 @@ pub const Runner = struct {
         });
         const f = c.stdin orelse return;
         f.writeStreamingAll(r.io, line) catch {
-            r.close();
+            r.close(true);
             if (!r.ext.note_bad) r.errorView("The extension host disconnected");
             r.hooks.redraw(r.hooks.ctx);
         };
@@ -394,7 +418,7 @@ pub const Runner = struct {
 
     pub fn ended(ctx: ?*anyopaque) callconv(.c) void {
         const r: *Runner = @ptrCast(@alignCast(ctx));
-        r.close();
+        r.close(false);
         if (r.ext.open and r.ext.view == null) {
             var arena: std.heap.ArenaAllocator = .init(r.gpa);
             const text = if (r.ext.note_len > 0) r.ext.note_buf[0..r.ext.note_len] else "Command finished";

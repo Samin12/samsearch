@@ -59,7 +59,11 @@ fn migrateInner(gpa: std.mem.Allocator, io: std.Io, parent: std.Io.Dir, old: []c
     defer parent.deleteTree(io, stage) catch {};
     var target = try parent.openDir(io, stage, .{});
     defer target.close(io);
-    if (copyAll(gpa, io, source, target)) target.writeFile(io, .{ .sub_path = incomplete_marker, .data = "" }) catch {};
+    // Marked incomplete before anything is copied and unmarked only after
+    // a full copy: a failure at any point, the marker's own included,
+    // can't publish a partial copy as finished.
+    try target.writeFile(io, .{ .sub_path = incomplete_marker, .data = "" });
+    if (!copyAll(gpa, io, source, target)) target.deleteFile(io, incomplete_marker) catch {};
     // A concurrent launch may have published first: keep its data.
     try publish(io, parent, stage, dest);
 }
@@ -189,6 +193,8 @@ test "first use copies commands and symlinks, preserves source, and never overwr
         try t.expect(stat.permissions.toMode() & 0o100 != 0);
     }
     try t.expectError(error.FileNotFound, tmp.dir.openFile(t.io, "SamSearch/prefs.json", .{}));
+    // A full copy isn't left marked incomplete.
+    try t.expectError(error.FileNotFound, tmp.dir.access(t.io, "SamSearch/" ++ incomplete_marker, .{}));
     if (@import("builtin").os.tag != .windows) {
         const n = try tmp.dir.readLink(t.io, "SamSearch/extensions/demo/bin/link", &buf);
         try t.expectEqualStrings("../package.json", buf[0..n]);

@@ -473,3 +473,21 @@ test "a command that closes its output keeps running until it exits on its own" 
     // Exited by itself, not killed after the 2 s stop deadline.
     try std.testing.expectEqual(std.process.Child.Term{ .exited = 7 }, job.term.?);
 }
+
+test "stopping a command that closed its output still stops the process" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const child = try std.process.spawn(threaded.io(), .{ .argv = &.{ "/bin/sh", "-c", "exec >&-; sleep 30" }, .stdin = .ignore, .stdout = .pipe, .stderr = .ignore });
+    const job = @import("raycast.zig").ProcessJob.start(child, false) orelse return error.SpawnFailed;
+    defer job.release();
+    std.Io.sleep(threaded.io(), .fromMilliseconds(200), .awake) catch {};
+    try std.testing.expect(!job.done.load(.acquire));
+    job.cancel();
+    var waited: usize = 0;
+    while (!job.done.load(.acquire) and waited < 200) : (waited += 1) {
+        std.Io.sleep(threaded.io(), .fromMilliseconds(20), .awake) catch {};
+    }
+    try std.testing.expect(job.done.load(.acquire));
+    try std.testing.expect(job.term.? == .signal);
+}

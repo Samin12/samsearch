@@ -226,10 +226,8 @@ pub const Runner = struct {
         if (r.watch) |w| w.cancel();
         r.watch = null;
         r.state = .closing;
-        if (r.reaping) |job| {
-            job.owner = null;
-            job.release();
-        }
+        // A script that closed its output may still be working: stop it too.
+        if (r.reaping) |job| job.drop(true);
         r.reaping = null;
         if (r.child) |child| {
             if (ProcessJob.start(child, true)) |job| job.release();
