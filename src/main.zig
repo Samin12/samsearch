@@ -439,7 +439,10 @@ pub const Live = struct {
         l.keep_open = false;
         if (comptime mac) {
             const objc = nanoui.objc;
-            objc.msg(void, l.app.nsapp, "unhide:", .{@as(?objc.Object, null)});
+            // Only after ⌘H: unhide: also activates the app, which takes the
+            // keys from the non-activating panel and hides it again.
+            if (objc.msg(objc.BOOL, l.app.nsapp, "isHidden", .{}) != objc.NO)
+                objc.msg(void, l.app.nsapp, "unhideWithoutActivation", .{});
             @import("helper_mac.zig").check();
         }
         if (w.isVisible() and panel.focused(w)) return;
