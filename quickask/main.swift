@@ -1009,20 +1009,24 @@ final class Connection {
                     if control.cancelled { terminal("cancelled") } else if let err { terminal("error", err) } else { terminal("handoff", q) }
                     return
                 }
-                var held = "", sure = false, displayed = ""
+                // `shown` counts Unicode scalars, not Characters: a combining
+                // accent or emoji joiner in a new piece changes no Character count.
+                var held = "", sure = false, displayed = "", shown = 0
                 let full = try await agentAnswer(q, history: history, screen: s, allowHandoff: mode != "answer", onDelta: { piece in
                     guard !control.cancelled else { return }
                     held += piece
                     let t = held.trimmingCharacters(in: .whitespacesAndNewlines)
                     if !sure && !HANDOFF.hasPrefix(t) && !t.hasPrefix(HANDOFF) { sure = true }
                     if sure {
-                        let delta = String(held.dropFirst(displayed.count))
+                        let scalars = held.unicodeScalars
+                        let delta = String(String.UnicodeScalarView(scalars.dropFirst(shown)))
+                        shown = scalars.count
                         displayed = held
                         Sessions.shared.update(sid, id, text: displayed)
                         self.streamLine(["d": delta])
                     }
                 }, onStatus: { status in
-                    held = ""; displayed = ""; sure = false
+                    held = ""; displayed = ""; shown = 0; sure = false
                     Sessions.shared.update(sid, id, text: "")
                     self.streamLine(["status": status])
                 })

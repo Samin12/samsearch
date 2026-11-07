@@ -30,11 +30,17 @@ fn migrate(gpa: std.mem.Allocator, io: std.Io, parent: std.Io.Dir, old: []const 
     };
 }
 
+/// In a published copy that missed something it could have copied (a
+/// permission or disk error): later launches fill in what's missing.
+const incomplete_marker = ".migration-incomplete";
+
 fn migrateInner(gpa: std.mem.Allocator, io: std.Io, parent: std.Io.Dir, old: []const u8, dest: []const u8) !void {
     cleanupStages(io, parent, dest);
     if (parent.openDir(io, dest, .{})) |d| {
-        d.close(io);
-        return;
+        var published = d;
+        defer published.close(io);
+        published.access(io, incomplete_marker, .{}) catch return;
+        return retry(gpa, io, parent, old, published);
     } else |err| switch (err) {
         error.FileNotFound => {},
         else => return err,
@@ -53,13 +59,40 @@ fn migrateInner(gpa: std.mem.Allocator, io: std.Io, parent: std.Io.Dir, old: []c
     defer parent.deleteTree(io, stage) catch {};
     var target = try parent.openDir(io, stage, .{});
     defer target.close(io);
-    for ([_][]const u8{ "extensions", "script-commands" }) |name| {
-        copyEntry(gpa, io, source, target, name, .directory) catch |err| {
-            std.log.warn("samsearch: migration skipped {s} ({s})", .{ name, @errorName(err) });
-        };
-    }
+    if (copyAll(gpa, io, source, target)) target.writeFile(io, .{ .sub_path = incomplete_marker, .data = "" }) catch {};
     // A concurrent launch may have published first: keep its data.
     try publish(io, parent, stage, dest);
+}
+
+/// Copies what's still missing into an incomplete copy; existing files
+/// (the user's since) are never replaced.
+fn retry(gpa: std.mem.Allocator, io: std.Io, parent: std.Io.Dir, old: []const u8, published: std.Io.Dir) !void {
+    var source = parent.openDir(io, old, .{}) catch |err| switch (err) {
+        // The old folder is gone: nothing more can come from it.
+        error.FileNotFound => return published.deleteFile(io, incomplete_marker),
+        else => return err,
+    };
+    defer source.close(io);
+    if (!copyAll(gpa, io, source, published)) try published.deleteFile(io, incomplete_marker);
+}
+
+/// True when something that could be copied wasn't.
+fn copyAll(gpa: std.mem.Allocator, io: std.Io, source: std.Io.Dir, target: std.Io.Dir) bool {
+    var incomplete = false;
+    for ([_][]const u8{ "extensions", "script-commands" }) |name| {
+        copyEntry(gpa, io, source, target, name, .directory, &incomplete) catch |err| skipped(name, err, &incomplete);
+    }
+    return incomplete;
+}
+
+/// Special files (pipes, sockets) and a missing folder are left out for
+/// good; anything else is a failure worth another try.
+fn skipped(name: []const u8, err: anyerror, incomplete: *bool) void {
+    switch (err) {
+        error.UnsupportedMigrationEntry, error.FileNotFound, error.NotDir => {},
+        else => incomplete.* = true,
+    }
+    std.log.warn("samsearch: migration skipped {s} ({s})", .{ name, @errorName(err) });
 }
 
 fn publish(io: std.Io, parent: std.Io.Dir, stage: []const u8, dest: []const u8) !void {
@@ -72,26 +105,33 @@ fn publish(io: std.Io, parent: std.Io.Dir, stage: []const u8, dest: []const u8) 
     };
 }
 
-fn copyEntry(gpa: std.mem.Allocator, io: std.Io, source: std.Io.Dir, target: std.Io.Dir, name: []const u8, kind: std.Io.File.Kind) anyerror!void {
+fn copyEntry(gpa: std.mem.Allocator, io: std.Io, source: std.Io.Dir, target: std.Io.Dir, name: []const u8, kind: std.Io.File.Kind, incomplete: *bool) anyerror!void {
     switch (kind) {
         .directory => {
             var src = try source.openDir(io, name, .{ .iterate = true });
             defer src.close(io);
-            try target.createDir(io, name, .default_dir);
+            target.createDir(io, name, .default_dir) catch |err| switch (err) {
+                error.PathAlreadyExists => {},
+                else => return err,
+            };
             var dst = try target.openDir(io, name, .{});
             defer dst.close(io);
             var it = src.iterate();
             while (try it.next(io)) |entry| {
-                copyEntry(gpa, io, src, dst, entry.name, entry.kind) catch |err| {
-                    std.log.warn("samsearch: migration skipped {s} ({s})", .{ entry.name, @errorName(err) });
-                };
+                copyEntry(gpa, io, src, dst, entry.name, entry.kind, incomplete) catch |err| skipped(entry.name, err, incomplete);
             }
         },
-        .file => try source.copyFile(name, target, name, io, .{ .replace = false }),
+        .file => {
+            // Already there (copied before, or the user's own): keep it.
+            target.access(io, name, .{}) catch return source.copyFile(name, target, name, io, .{ .replace = false });
+        },
         .sym_link => {
             var link: [std.fs.max_path_bytes]u8 = undefined;
             const n = try source.readLink(io, name, &link);
-            try target.symLink(io, link[0..n], name, .{});
+            target.symLink(io, link[0..n], name, .{}) catch |err| switch (err) {
+                error.PathAlreadyExists => {},
+                else => return err,
+            };
         },
         else => return error.UnsupportedMigrationEntry,
     }
@@ -172,6 +212,7 @@ test "preparing a fresh data directory does not invent a legacy folder" {
     try t.expectError(error.FileNotFound, tmp.dir.openDir(t.io, "SamSearch", .{}));
 }
 
+extern "c" fn chmod(path: [*:0]const u8, mode: std.c.mode_t) c_int;
 extern "c" fn mkfifo(path: [*:0]const u8, mode: std.c.mode_t) c_int;
 
 test "migration skips a special entry, cleans abandoned stages, and preserves live stages" {
@@ -219,4 +260,31 @@ test "another launch winning publication preserves its data and does not fail" {
     try publish(t.io, tmp.dir, "stage", "SamSearch");
     var buf: [32]u8 = undefined;
     try t.expectEqualStrings("winner", try tmp.dir.readFile(t.io, "SamSearch/record", &buf));
+}
+
+test "a copy that missed a file it could read later fills it in, then stops retrying" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const t = std.testing;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(t.io, "Nanolight/script-commands");
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "Nanolight/script-commands/ok.sh", .data = "ok" });
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "Nanolight/script-commands/locked.sh", .data = "locked" });
+    // Unreadable now (a permission problem the user can fix).
+    const root = try tmp.dir.realPathFileAlloc(t.io, ".", t.allocator);
+    defer t.allocator.free(root);
+    const locked = try std.fmt.allocPrintSentinel(t.allocator, "{s}/Nanolight/script-commands/locked.sh", .{root}, 0);
+    defer t.allocator.free(locked);
+    try t.expectEqual(@as(c_int, 0), chmod(locked, 0o000));
+    try migrate(t.allocator, t.io, tmp.dir, "Nanolight", "SamSearch");
+    var buf: [32]u8 = undefined;
+    try t.expectEqualStrings("ok", try tmp.dir.readFile(t.io, "SamSearch/script-commands/ok.sh", &buf));
+    try tmp.dir.access(t.io, "SamSearch/" ++ incomplete_marker, .{});
+    // The user edits a copied file; then the permission is fixed.
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "SamSearch/script-commands/ok.sh", .data = "mine" });
+    try t.expectEqual(@as(c_int, 0), chmod(locked, 0o644));
+    try migrate(t.allocator, t.io, tmp.dir, "Nanolight", "SamSearch");
+    try t.expectEqualStrings("locked", try tmp.dir.readFile(t.io, "SamSearch/script-commands/locked.sh", &buf));
+    try t.expectEqualStrings("mine", try tmp.dir.readFile(t.io, "SamSearch/script-commands/ok.sh", &buf));
+    try t.expectError(error.FileNotFound, tmp.dir.access(t.io, "SamSearch/" ++ incomplete_marker, .{}));
 }

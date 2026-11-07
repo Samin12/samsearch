@@ -213,7 +213,9 @@ pub const ProcessJob = struct {
                     break;
                 }
                 if (result < 0 and std.posix.errno(result) != .INTR) break;
-                if (ticks == 100) _ = std.c.kill(pid, .KILL);
+                // Only a stop escalates; a command that closed its output
+                // but keeps working is left to finish (EOF is not an exit).
+                if (job.terminate and ticks == 100) _ = std.c.kill(pid, .KILL);
                 std.Io.sleep(worker_io, .fromMilliseconds(20), .awake) catch {};
                 ticks += 1;
             }
@@ -226,7 +228,8 @@ pub const ProcessJob = struct {
         job.done.store(true, .release);
         if (job.completed != null and !builtin.is_test) {
             _ = job.refs.fetchAdd(1, .monotonic);
-            nanoui.App.after(0, job, delivered);
+            // From this worker: `after` needs the main thread on Windows.
+            nanoui.App.onMain(job, delivered);
         }
     }
     fn delivered(ctx: ?*anyopaque) callconv(.c) void {

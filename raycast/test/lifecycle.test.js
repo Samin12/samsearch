@@ -211,7 +211,8 @@ test("a second install is blocked and cancellation removes staging and npm proce
   const closed=new Promise(resolve=>child.on("close",resolve));
   let text="", stderr=""; child.stdout.on("data",c=>{text+=c}); child.stderr.on("data",c=>{stderr+=c});
   t.after(async()=>{child.kill();await closed});
-  for(let n=0;n<400&&!text.includes('"pid"');n++) await new Promise(resolve=>setTimeout(resolve,5));
+  // Both lines are async: the npm stand-in's pid and the second install's refusal.
+  for(let n=0;n<400&&!(text.includes('"pid"')&&text.includes("already running"));n++) await new Promise(resolve=>setTimeout(resolve,5));
   assert.match(text,/already running/);
   const pid=JSON.parse(text.split("\n").find(line=>line.includes('"pid"'))).pid;
   child.kill("SIGTERM"); await closed;
@@ -229,4 +230,43 @@ test("an action component render error becomes an error view", async (t) => {
   const view=(await render(s,v=>v.title==="Error")).view;
   assert.match(view.markdown,/actions exploded/);
   assert.deepEqual(view.actions,[]);
+});
+
+test("a hidden parent's render error waits until the parent shows again", async (t) => {
+  const s=command(t,`let explode=null;
+    function Child(){return h(Detail,{markdown:"child here"})}
+    module.exports=function Parent(){
+      const [n,setN]=React.useState(0);
+      explode=()=>setN(1);
+      if(n===1) throw new Error("parent exploded");
+      return h(Detail,{markdown:"parent",actions:h(ActionPanel,null,
+        h(Action.Push,{title:"Child",target:h(Child)}),
+        h(Action,{title:"Later",onAction:()=>{}}))});
+    };
+    setInterval(()=>{ if(globalThis.__go) explode(); },10);
+    process.stdin.on("data",d=>{ if(String(d).includes("go-now")) globalThis.__go=true; });`);
+  const parent=(await render(s,v=>v.markdown==="parent")).view;
+  s.send({type:"action",id:parent.actions[0].id});
+  const child=(await render(s,v=>v.markdown==="child here")).view;
+  s.send({type:"go-now"});
+  await new Promise(resolve=>setTimeout(resolve,150));
+  // Nothing replaced the child: no error message, and no error view for it.
+  assert.ok(!s.lines.some(m=>m.type==="error"));
+  assert.ok(!s.lines.some(m=>m.type==="render"&&m.view.viewId===child.viewId&&m.view.title==="Error"));
+  s.send({type:"pop"});
+  const back=(await render(s,v=>v.title==="Error")).view;
+  assert.equal(back.viewId,parent.viewId);
+  assert.match(back.markdown,/parent exploded/);
+});
+
+test("an action component's own state change reaches the screen", async (t) => {
+  const s=command(t,`function Fetched(){
+      const [title,setTitle]=React.useState("old");
+      React.useEffect(()=>{ const id=setTimeout(()=>setTitle("new"),30); return ()=>clearTimeout(id); },[]);
+      return h(ActionPanel,null,h(Action,{title,onAction:()=>{}}));
+    }
+    module.exports=()=>h(Detail,{markdown:"ready",actions:h(Fetched)});`);
+  await render(s,v=>v.actions.some(a=>a.title==="old"));
+  const view=(await render(s,v=>v.actions.some(a=>a.title==="new"))).view;
+  assert.equal(view.actions.length,1);
 });

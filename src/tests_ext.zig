@@ -456,3 +456,20 @@ test "refresh keeps unsent edits and applies later controlled form and search va
         if (i == 0) ext.query.set("typed query");
     }
 }
+
+test "a command that closes its output keeps running until it exits on its own" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    // Closes stdout (EOF for the panel), then works for 4 s and exits 7.
+    const child = try std.process.spawn(threaded.io(), .{ .argv = &.{ "/bin/sh", "-c", "exec >&-; sleep 4; exit 7" }, .stdin = .ignore, .stdout = .pipe, .stderr = .ignore });
+    const job = @import("raycast.zig").ProcessJob.start(child, false) orelse return error.SpawnFailed;
+    defer job.release();
+    var waited: usize = 0;
+    while (!job.done.load(.acquire) and waited < 400) : (waited += 1) {
+        std.Io.sleep(threaded.io(), .fromMilliseconds(20), .awake) catch {};
+    }
+    try std.testing.expect(job.done.load(.acquire));
+    // Exited by itself, not killed after the 2 s stop deadline.
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 7 }, job.term.?);
+}

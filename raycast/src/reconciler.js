@@ -17,7 +17,7 @@ function newSession(entry) {
     id: ++nextViewId, entry, container: null, root: null, scheduled: false,
     lastJson: "", currentView: null, searchText: "", selectedId: null,
     formValues: {}, dropdownFired: new WeakSet(), actions: new Map(),
-    actionRoots: new Map(), actionIds: new WeakMap(), nextAction: 0, renderGeneration: 0, previousActions: new Map(), error: null,
+    actionRoots: new Map(), actionIds: new WeakMap(), nextAction: 0, renderGeneration: 0, previousActions: new Map(), error: null, serializing: false,
   };
 }
 
@@ -93,8 +93,11 @@ function actionsFromElement(element, prefix) {
   const key = prefix || "actions";
   let scratch = session.actionRoots.get(key);
   if (!scratch) {
-    scratch = { root: null, onCommit() {} };
     const target = session;
+    // An action component's own state change (say, after a fetch) re-renders
+    // the view; commits made while serializing it are ignored, or each
+    // render would schedule the next.
+    scratch = { root: null, onCommit() { if (session === target && !target.serializing) scheduleRender(); } };
     const onError = (error) => reportRenderError(error, target);
     scratch.fiber = Reconciler.createContainer(scratch, 0, null, false, null, "", onError, onError, onError);
     session.actionRoots.set(key, scratch);
@@ -323,6 +326,12 @@ function wireActions(view) {
 
 function flushRender() {
   if (!session) return;
+  const target = session;
+  target.serializing = true;
+  try { renderView(); } finally { target.serializing = false; }
+}
+
+function renderView() {
   session.previousActions = session.actions;
   session.actions = new Map();
   session.renderGeneration++;
@@ -398,8 +407,11 @@ function reportRenderError(error, target = session) {
   log("render error", error && error.stack ? error.stack : error);
   target.error = error && error.message ? error.message : String(error);
   target.actions.clear();
+  // A view under the one showing keeps its error until it's shown again
+  // (its render is the error view); it must not cover the child.
+  if (target !== session) return;
   send({ type: "error", message: target.error });
-  if (target === session) scheduleRender();
+  scheduleRender();
 }
 
 function force() {
