@@ -40,6 +40,25 @@ pub fn applyChoice(ctx: *anyopaque, choice: shortcut.Choice) void {
     Live.apply(ctx, choice);
 }
 
+pub fn tryApplyChoice(ctx: *anyopaque, choice: shortcut.Choice) anyerror!void {
+    const live: *Live = @ptrCast(@alignCast(ctx));
+    try live.changeKey(choice);
+}
+
+pub fn loginStatus(_: *anyopaque, set: ?bool) @import("settings_host.zig").LoginState {
+    const login = @import("login.zig");
+    if (set != null) _ = login.login(set);
+    return switch (login.state()) {
+        .enabled => .on,
+        .requires_approval => .requires_approval,
+        .off, .unavailable => .off,
+    };
+}
+
+pub fn loginSettings(_: *anyopaque) void {
+    @import("login.zig").openSettings();
+}
+
 pub fn recordKey(ctx: *anyopaque, on: bool) void {
     Live.record(ctx, on);
 }
@@ -71,6 +90,7 @@ pub const Live = struct {
     /// many pauses are still being waited out (only the last one asks).
     asking: [suggest.max_len]u8 = undefined,
     asking_len: usize = 0,
+    asking_generation: u64 = 0,
     waiting: u32 = 0,
     files: @import("files_live.zig").State = .{},
     digup: @import("digup_live.zig").State = .{},
@@ -92,11 +112,14 @@ pub const Live = struct {
     env: ?*const std.process.Environ.Map = null,
     /// The next `hide` is skipped: a command just took the panel.
     keep_open: bool = false,
+    visibility: enum { hidden, shown, hiding } = .hidden,
+    key_error: ?anyerror = null,
+    pending_key: ?shortcut.Choice = null,
 
     fn host(l: *Live) view.Host {
         const bind = @import("settings_bind.zig");
         bind.box.ctx = l;
-        return .{ .ctx = l, .open = open, .hide = hide, .resize = resize, .suggest = ask, .files = if (mac) @import("files_live.zig").askFiles else null, .digup = if (mac) @import("digup_live.zig").ask else null, .reveal = if (mac) revealFile else null, .chrome = if (mac) openInChrome else null, .preview = if (mac) showPage else null, .settings = &bind.box };
+        return .{ .ctx = l, .open = open, .hide = hide, .resize = resize, .suggest = ask, .files = if (mac) @import("files_live.zig").askFiles else null, .digup = if (mac) @import("digup_live.zig").ask else null, .reveal = if (mac) revealFile else null, .chrome = if (mac) openInChrome else null, .preview = if (mac) showPage else null, .move_answer = if (mac) moveAnswer else null, .settings = &bind.box };
     }
 
     fn openInChrome(ctx: *anyopaque, profile: []const u8, url: []const u8) void {
@@ -121,6 +144,7 @@ pub const Live = struct {
             _ = nanoui.shell.openUrl(target);
         } else if (rc.isCommand(target)) {
             rc.start(l, target);
+            nanoui.App.after(0, l, clearKeepOpen);
         } else if (single.isSelf(target)) {
             // Nanolight is already open: the panel comes back, empty,
             // rather than macOS starting a second copy.
@@ -160,8 +184,13 @@ pub const Live = struct {
         var at: [24]u8 = undefined;
         l.kv.set(sync_at_key, std.fmt.bufPrint(&at, "{d}", .{st.at}) catch "0") catch {};
         if (shortcut.Choice.parse(st.hotkey)) |c| if (!c.eql(l.choice)) {
-            shortcut.save(l.kv, c);
-            l.useKey(c);
+            if (l.recorder.active()) {
+                l.pending_key = c;
+            } else {
+                if (l.useKey(c)) |_| {
+                    shortcut.save(l.kv, c);
+                } else |_| {}
+            }
         };
         if (st.suggest != l.s.suggest_on) {
             l.s.suggest_on = st.suggest;
@@ -196,8 +225,7 @@ pub const Live = struct {
         const a = if (l.acct) |*x| x else return;
         switch (a.state) {
             .signed_out => a.signIn(),
-            .starting => {},
-            .waiting, .signed_in => a.signOut(),
+            .starting, .waiting, .signed_in => a.signOut(),
         }
     }
 
@@ -213,9 +241,13 @@ pub const Live = struct {
     fn ask(ctx: *anyopaque, query: []const u8) void {
         const l: *Live = @ptrCast(@alignCast(ctx));
         const q = std.mem.trim(u8, query, " ");
-        if (q.len > suggest.max_len) return;
+        if (q.len > suggest.max_len) {
+            l.s.googleAnswered(l.s.pipeline.generation, null);
+            return;
+        }
         @memcpy(l.asking[0..q.len], q);
         l.asking_len = q.len;
+        l.asking_generation = l.s.pipeline.generation;
         l.waiting += 1;
         nanoui.App.after(suggest.pause_ms, l, struct {
             fn f(c: ?*anyopaque) callconv(.c) void {
@@ -229,9 +261,14 @@ pub const Live = struct {
     fn send(l: *Live) void {
         const q = l.asking[0..l.asking_len];
         // Typed on, or turned off, while it waited.
-        if (!l.s.suggest_on or !suggest.same(q, l.s.query.text())) return;
-        const a = l.app.gpa.create(Ask) catch return;
-        a.* = .{ .live = l, .len = q.len };
+        const generation = l.asking_generation;
+        if (generation != l.s.pipeline.generation or !l.s.suggest_on or !suggest.same(q, l.s.query.text())) return;
+        const a = l.app.gpa.create(Ask) catch {
+            l.s.googleAnswered(generation, null);
+            if (l.window) |w| w.redraw();
+            return;
+        };
+        a.* = .{ .live = l, .len = q.len, .generation = generation };
         @memcpy(a.text[0..q.len], q);
         var buf: [512]u8 = undefined;
         nanoui.http.fetch(l.app.gpa, .{
@@ -246,6 +283,18 @@ pub const Live = struct {
         const l: *Live = @ptrCast(@alignCast(ctx));
         const w = l.window orelse return;
         if (url) |u| l.preview.show(w, u, l.s.last_h) else l.preview.hide();
+    }
+
+    /// ⌘↩ on a Quick Ask page: its conversation moves to the floating window.
+    fn moveAnswer(ctx: *anyopaque) void {
+        const l: *Live = @ptrCast(@alignCast(ctx));
+        if (comptime mac) l.preview.moveAnswer(.{ .ctx = l, .func = answerMoved });
+    }
+
+    fn answerMoved(ctx: *anyopaque, ok: bool) void {
+        const l: *Live = @ptrCast(@alignCast(ctx));
+        l.s.answerMoved(ok);
+        if (l.window) |w| w.redraw();
     }
 
     /// Escape or ⌘↩ while the page has the keys.
@@ -309,7 +358,7 @@ pub const Live = struct {
             acc[1],
             .separator,
             .{ .label = label, .disabled = l.updater == null, .click = .of(l, Live.updateNow) },
-            .{ .label = "Quit SamSearch", .role = .quit },
+            .{ .label = "Quit SamSearch", .click = .of(l, Live.quitMenu) },
         }) catch {};
     }
 
@@ -334,26 +383,37 @@ pub const Live = struct {
     /// stops): an "Updated" note is done. (An update waiting goes in once
     /// the panel has been away a while: nanoui's `autoRestart`.)
     fn keyChanged(ctx: *anyopaque, w: *nanoui.Window) void {
-        const l: *Live = @ptrCast(@alignCast(ctx));
         if (w.isFocused()) return;
-        if (comptime mac) if (l.drag.active) return;
-        if (l.recorder.active()) record(l, false);
-        l.through.stop();
-        l.s.note = "";
-        // Hide here rather than in nanoui's popover delegate, so native
-        // file drags may keep their source window until they finish.
-        if (w.isVisible()) w.hide();
-        if (!mac) @import("update_pc.zig").away(l);
+        hidePanel(ctx);
+    }
+
+    fn clearKeepOpen(ctx: ?*anyopaque) callconv(.c) void {
+        const l: *Live = @ptrCast(@alignCast(ctx.?));
+        l.keep_open = false;
     }
 
     fn hide(ctx: *anyopaque) void {
         const l: *Live = @ptrCast(@alignCast(ctx));
-        if (comptime mac) if (l.drag.active) return;
-        if (l.keep_open) {
-            l.keep_open = false;
-            return;
-        }
-        if (l.window) |w| w.hide();
+        const keep = l.keep_open;
+        l.keep_open = false;
+        if (!keep) hidePanel(ctx);
+    }
+
+    /// Every forced hide shares the same cleanup, including a native drag's end.
+    pub fn hidePanel(ctx: *anyopaque) void {
+        const l: *Live = @ptrCast(@alignCast(ctx));
+        l.keep_open = false;
+        if (comptime mac) if (l.drag.active()) return;
+        if (l.visibility == .hiding) return;
+        l.visibility = .hiding;
+        l.s.settings_ui.finishRecording();
+        l.through.stop();
+        l.s.back();
+        l.preview.hide();
+        l.s.note = "";
+        if (l.window) |w| if (w.isVisible()) w.hide();
+        l.visibility = .hidden;
+        if (!mac) @import("update_pc.zig").away(l);
     }
 
     /// The window (or the Mac's glass under the panel) to its height.
@@ -367,16 +427,30 @@ pub const Live = struct {
 
     fn toggle(ctx: *anyopaque) void {
         const l: *Live = @ptrCast(@alignCast(ctx));
-        if (comptime mac) if (l.drag.active) return;
+        if (comptime mac) if (l.drag.active()) return;
         const w = l.window orelse return;
         const showing = w.isVisible() and panel.focused(w);
         l.o.pressed(showing);
-        if (showing) return w.hide();
-        // Freed a key in System Settings, quit a launcher: look again.
-        if (l.o.active) l.o.refresh();
+        if (showing) hidePanel(l) else l.showPanel();
+    }
+
+    pub fn showPanel(l: *Live) void {
+        const w = l.window orelse return;
+        l.keep_open = false;
+        if (comptime mac) {
+            const objc = nanoui.objc;
+            objc.msg(void, l.app.nsapp, "unhide:", .{@as(?objc.Object, null)});
+            @import("helper_mac.zig").check();
+        }
+        if (w.isVisible() and panel.focused(w)) return;
+        if (l.o.active) {
+            l.s.settings_ui.finishRecording();
+            l.o.refresh();
+        }
         panel.place(w);
         rc.refresh(l);
         l.s.reveal();
+        l.visibility = .shown;
         w.show();
         panel.shown(w);
         l.through.start();
@@ -385,13 +459,33 @@ pub const Live = struct {
     }
 
     fn hooks(l: *Live) @import("onboard.zig").Hooks {
-        return .{ .ctx = l, .apply = apply, .fix = fix, .login = login, .done = done };
+        return .{ .ctx = l, .apply = apply, .fix = fix, .login = login, .done = done, .key_error = keyError, .starting = cancelRecording };
     }
 
-    fn useKey(l: *Live, choice: shortcut.Choice) void {
+    fn cancelRecording(ctx: *anyopaque) void {
+        const l: *Live = @ptrCast(@alignCast(ctx));
+        l.s.settings_ui.finishRecording();
+    }
+
+    pub fn keyError(ctx: *anyopaque) ?[]const u8 {
+        const l: *Live = @ptrCast(@alignCast(ctx));
+        return if (l.key_error) |_| "That shortcut couldn't be registered. Your previous shortcut is still set." else null;
+    }
+
+    fn useKey(l: *Live, choice: shortcut.Choice) !void {
+        hotkey.register(choice, .{ .ctx = l, .func = toggle }) catch |err| {
+            l.key_error = err;
+            return err;
+        };
         l.choice = choice;
-        hotkey.register(choice, .{ .ctx = l, .func = toggle }) catch |e|
-            std.log.warn("nanolight: {f} can't be registered ({s}); open it from the menu bar", .{ choice, @errorName(e) });
+        l.key_error = null;
+    }
+
+    pub fn changeKey(l: *Live, choice: shortcut.Choice) !void {
+        if (l.recorder.active()) return error.RecordingShortcut;
+        try l.useKey(choice);
+        shortcut.save(l.kv, choice);
+        l.touched();
     }
 
     /// Settings records a key: until it has one, keys pressed go to it,
@@ -399,13 +493,22 @@ pub const Live = struct {
     pub fn record(ctx: *anyopaque, on: bool) void {
         const l: *Live = @ptrCast(@alignCast(ctx));
         if (on) {
-            hotkey.unregister();
             l.recorder.start(.{ .ctx = l, .func = recorded });
+            if (l.recorder.active()) hotkey.unregister() else {
+                l.key_error = error.RecorderFailed;
+                l.s.settings_ui.finishRecording();
+            }
             return;
         }
         l.recorder.stop();
-        l.s.settings_ui.recording = false;
-        l.useKey(l.choice);
+        const choice = l.pending_key orelse l.choice;
+        l.pending_key = null;
+        l.useKey(choice) catch {
+            // The deferred synced key failed; resume the key recording paused.
+            hotkey.register(l.choice, .{ .ctx = l, .func = toggle }) catch {};
+            return;
+        };
+        shortcut.save(l.kv, choice);
     }
 
     fn recorded(ctx: *anyopaque, r: shortcut.Recorded) void {
@@ -416,9 +519,9 @@ pub const Live = struct {
 
     pub fn apply(ctx: *anyopaque, choice: shortcut.Choice) void {
         const l: *Live = @ptrCast(@alignCast(ctx));
-        shortcut.save(l.kv, choice);
-        l.useKey(choice);
-        l.touched();
+        l.changeKey(choice) catch {
+            if (l.window) |w| w.redraw();
+        };
     }
 
     fn fix(ctx: *anyopaque, clash: shortcut.Clash) void {
@@ -456,8 +559,9 @@ pub const Live = struct {
     }
 
     fn welcome(l: *Live, item: *nanoui.menu.Item) void {
+        l.s.settings_ui.finishRecording();
         l.o.start(l.choice);
-        if (l.window) |w| if (w.isVisible()) w.hide();
+        hidePanel(l);
         l.menuShow(item);
     }
 
@@ -467,8 +571,9 @@ pub const Live = struct {
             fn f(ctx: ?*anyopaque) callconv(.c) void {
                 const live: *Live = @ptrCast(@alignCast(ctx.?));
                 const w = live.window orelse return;
-                if (!(w.isVisible() and w.isFocused())) toggle(live);
-                live.o.active = false;
+                live.showPanel();
+                live.s.settings_ui.finishRecording();
+                if (live.o.active) live.o.finish(live.s, "");
                 live.s.openSettings();
                 w.redraw();
             }
@@ -479,9 +584,26 @@ pub const Live = struct {
         // The menu closes first; then the panel takes the keys.
         nanoui.App.after(50, l, struct {
             fn f(ctx: ?*anyopaque) callconv(.c) void {
-                toggle(ctx.?);
+                const live: *Live = @ptrCast(@alignCast(ctx.?));
+                live.showPanel();
             }
         }.f);
+    }
+    fn quitMenu(l: *Live, _: *nanoui.menu.Item) void {
+        l.app.quit();
+    }
+
+    fn reopen(ctx: ?*anyopaque) void {
+        const l: *Live = @ptrCast(@alignCast(ctx orelse return));
+        l.showPanel();
+    }
+
+    fn terminate(_: ?*anyopaque) void {
+        if (comptime mac) @import("helper_mac.zig").stop();
+    }
+
+    fn panelKey(l: *Live) void {
+        hidePanel(l);
     }
 };
 
@@ -490,17 +612,24 @@ const Ask = struct {
     live: *Live,
     text: [suggest.max_len]u8 = undefined,
     len: usize,
+    generation: u64,
 
     fn done(a: *Ask, r: nanoui.http.Response) void {
         const l = a.live;
         defer l.app.gpa.destroy(a);
-        if (r.status != 200) return;
+        defer if (l.window) |w| w.redraw();
+        if (r.status != 200) {
+            l.s.googleAnswered(a.generation, null);
+            return;
+        }
         var arena: std.heap.ArenaAllocator = .init(l.app.gpa);
         defer arena.deinit();
         var list: suggest.List = .{};
-        if (!suggest.decode(arena.allocator(), r.body, a.text[0..a.len], &list)) return;
-        l.s.answered(a.text[0..a.len], &list);
-        if (l.window) |w| w.redraw();
+        if (!suggest.decode(arena.allocator(), r.body, a.text[0..a.len], &list)) {
+            l.s.googleAnswered(a.generation, null);
+            return;
+        }
+        l.s.googleAnswered(a.generation, &list);
     }
 };
 
@@ -536,7 +665,7 @@ pub fn main(init: std.process.Init) !void {
     // Copy installed commands before app/kv initialization creates the new folder.
     const data = try @import("data_dir.zig").prepare(init.gpa, init.io);
     init.gpa.free(data);
-    const app = try nanoui.App.create(init, .{ .name = "SamSearch", .quit_on_last_window_closed = false });
+    const app = try nanoui.App.create(init, .{ .name = "SamSearch", .quit_on_last_window_closed = false, .on_reopen = Live.reopen, .on_terminate = Live.terminate });
     defer app.destroy();
     var index: Index = .init(init.gpa);
     defer index.deinit();
@@ -549,6 +678,7 @@ pub fn main(init: std.process.Init) !void {
     defer s.found.deinit();
     defer s.dug.deinit();
     var live: Live = .{ .app = app, .s = &s, .o = &o, .kv = kv, .choice = shortcut.load(kv, init.gpa) };
+    app.options.ctx = &live;
     s.host = live.host();
     @import("files_live.zig").load(&live);
     if (kv.get(init.gpa, @import("digup.zig").enabled_key) catch null) |v| {
@@ -580,14 +710,29 @@ pub fn main(init: std.process.Init) !void {
     // Raycast extensions' commands among the apps (never in headless runs:
     // they're this machine's).
     rc.init(&live, init.environ_map);
+    live.runner.hooks.hide = Live.hidePanel;
+    live.scripts.hooks.hide = Live.hidePanel;
     defer rc.deinit(&live);
     rc.rescan(&live);
     // The newest launch is the one that stays; it hears `--toggle` (single.zig).
     if (single.claim(.{ .ctx = &live, .func = Live.command }) > 0) std.log.info("nanolight: asked an older copy to quit", .{});
     panel.setup(app, live.window.?, &s, if (o.active) o.height() else s.height());
-    live.useKey(live.choice);
+    live.useKey(live.choice) catch {};
     live.through = .{ .window = live.window, .height = &s.last_h };
-    if (mac) live.drag.start(live.window.?, &s, &live.through);
+    if (mac) {
+        live.drag.start(live.window.?, &s, &live.through);
+        live.drag.on_hide = .{ .ctx = &live, .func = Live.hidePanel };
+        panel.watchKeys(&live, Live.panelKey);
+        try app.setMenu(&.{
+            .{ .label = "SamSearch", .submenu = &.{
+                .{ .role = .about },
+                .{ .role = .hide },
+                .separator,
+                .{ .label = "Quit SamSearch", .click = .of(&live, Live.quitMenu) },
+            } },
+            .{ .role = .edit_menu },
+        });
+    } else panel.on_hide = .{ .ctx = &live, .func = Live.hidePanel };
     defer if (mac) live.drag.stop();
     live.preview.watch(.{ .ctx = &live, .func = Live.pageKey });
     o.hooks = live.hooks();
@@ -596,6 +741,7 @@ pub fn main(init: std.process.Init) !void {
     if (mac) live.tray = try app.newTray(.{ .symbol = "magnifyingglass", .tooltip = "SamSearch" });
     // Quick Ask, the helper inside the app: the Ask and DigUp pages, the T3 links.
     if (mac) @import("helper_mac.zig").start(init.io);
+    defer if (mac) @import("helper_mac.zig").stop();
     // The menu bar icon, unless Settings took it away.
     if (kv.get(init.gpa, menu_bar_key) catch null) |v| {
         defer init.gpa.free(v);
@@ -619,6 +765,7 @@ pub fn main(init: std.process.Init) !void {
         // never: it restarts into an update once the panel has been away
         // 10 s, unseen, and comes back as it was (update_pc.zig off the Mac).
         u.autoRestart(app, .{ .idle_ms = 10 * 1000 });
+        if (u.updatedFrom() != null) Live.hidePanel(&live);
     };
     // Signed in before: synced now. Signing in is from the menu.
     live.acct = .{ .gpa = init.gpa, .kv = kv, .hooks = live.accountHooks() };

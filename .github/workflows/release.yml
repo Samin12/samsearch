@@ -33,6 +33,8 @@ jobs:
       AC_API_ISSUER_ID: ${{ secrets.AC_API_ISSUER_ID }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: mlugg/setup-zig@v2
         with:
@@ -83,6 +85,8 @@ jobs:
 
       - name: Check
         run: |
+          test -x "zig-out/package/SamSearch.app/Contents/Helpers/Quick Ask.app/Contents/MacOS/QuickAsk"
+          codesign --verify --strict --verbose=2 "zig-out/package/SamSearch.app/Contents/Helpers/Quick Ask.app"
           codesign --verify --strict --verbose=2 zig-out/package/SamSearch.app
           hdiutil verify zig-out/package/nanolight-macos-arm64.dmg
           if [ -n "${NOTARY_KEY_PATH:-}" ]; then

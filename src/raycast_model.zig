@@ -46,6 +46,7 @@ pub const Option = struct {
 };
 
 pub const Field = struct {
+    controlled: bool = false,
     id: []const u8 = "",
     type: []const u8 = "text",
     title: ?[]const u8 = null,
@@ -56,6 +57,9 @@ pub const Field = struct {
 
 /// The top view: a list (a Grid comes as one), a detail or a form.
 pub const View = struct {
+    viewId: u64 = 0,
+    searchText: ?[]const u8 = null,
+    searchControlled: bool = false,
     kind: []const u8 = "list",
     title: ?[]const u8 = null,
     placeholder: ?[]const u8 = null,

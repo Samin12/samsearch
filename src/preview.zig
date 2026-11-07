@@ -16,19 +16,38 @@ pub const Watch = struct {
     func: *const fn (ctx: *anyopaque, key: Key) void,
 };
 
+/// Told whether Quick Ask moved its conversation to the floating window.
+pub const Moved = struct {
+    ctx: *anyopaque,
+    func: *const fn (ctx: *anyopaque, ok: bool) void,
+};
+
 pub const Preview = struct {
     web: ?objc.Object = null,
     /// Opens a link's new window in this one.
     ui_delegate: ?objc.Object = null,
     watcher: ?Watch = null,
+    navigation_delegate: ?objc.Object = null,
+    navigation: ?objc.Object = null,
+    state: enum { idle, loading, recovering, retrying, shown, failed } = .idle,
+    generation: u64 = 0,
+    /// Waiting on the page's `openAnswerWindow()`, for this page generation.
+    moving: ?Moved = null,
+    move_generation: u64 = 0,
+    url: [8192]u8 = undefined,
+    url_len: usize = 0,
 
     /// Shows `url` over the panel of `window`, which is `h` tall now.
     pub fn show(p: *Preview, window: *nanoui.Window, url: []const u8, h: f32) void {
         const pool = objc.Pool.push();
         defer pool.pop();
         const web = p.web orelse p.make(window) orelse return;
-        const u = objc.msg(?objc.Object, objc.class("NSURL"), "URLWithString:", .{objc.nsString(url)}) orelse return;
-        _ = objc.msg(?objc.Object, web, "loadRequest:", .{objc.msg(objc.Object, objc.class("NSURLRequest"), "requestWithURL:", .{u})});
+        if (url.len > p.url.len) return;
+        @memcpy(p.url[0..url.len], url);
+        p.url_len = url.len;
+        p.generation +%= 1;
+        p.state = .loading;
+        p.load();
         p.fit(h);
         objc.msg(void, web, "setHidden:", .{objc.NO});
     }
@@ -36,6 +55,9 @@ pub const Preview = struct {
     /// Takes the page away, and empties it: no sound left playing, and no
     /// old page under the next one while it loads.
     pub fn hide(p: *Preview) void {
+        p.generation +%= 1;
+        p.state = .idle;
+        p.navigation = null;
         const web = p.web orelse return;
         const pool = objc.Pool.push();
         defer pool.pop();
@@ -73,6 +95,57 @@ pub const Preview = struct {
         return buf[0..s.len];
     }
 
+    fn load(p: *Preview) void {
+        const web = p.web orelse return;
+        const u = objc.msg(?objc.Object, objc.class("NSURL"), "URLWithString:", .{objc.nsString(p.url[0..p.url_len])}) orelse return;
+        const req = objc.msg(objc.Object, objc.class("NSURLRequest"), "requestWithURL:", .{u});
+        p.navigation = objc.msg(?objc.Object, web, "loadRequest:", .{req});
+        p.later(8000, false);
+    }
+
+    fn failed(p: *Preview) void {
+        if (p.state != .loading and p.state != .retrying) return;
+        if (!std.mem.startsWith(u8, p.url[0..p.url_len], "http://127.0.0.1:47213/")) return;
+        const retry = p.state == .loading;
+        p.state = if (retry) .recovering else .failed;
+        p.navigation = null;
+        const web = p.web orelse return;
+        objc.msg(void, web, "stopLoading", .{});
+        const message = if (retry) "Quick Ask isn't responding. Restarting it…" else "Quick Ask isn't responding. Try again in a moment.";
+        const html = std.fmt.allocPrint(std.heap.page_allocator, "<body style=\"font:14px -apple-system;color:#888;padding:28px\">{s}</body>", .{message}) catch return;
+        defer std.heap.page_allocator.free(html);
+        _ = objc.msg(?objc.Object, web, "loadHTMLString:baseURL:", .{ objc.nsString(html), @as(?objc.Object, null) });
+        if (retry) {
+            @import("helper_mac.zig").restart();
+            p.later(3000, true);
+        }
+    }
+
+    const Timer = struct {
+        preview: *Preview,
+        generation: u64,
+        retry: bool,
+
+        fn fire(ctx: ?*anyopaque) callconv(.c) void {
+            const t: *Timer = @ptrCast(@alignCast(ctx.?));
+            defer std.heap.page_allocator.destroy(t);
+            const p = t.preview;
+            if (p.generation != t.generation) return;
+            if (t.retry) {
+                if (p.state != .recovering) return;
+                p.generation +%= 1;
+                p.state = .retrying;
+                p.load();
+            } else p.failed();
+        }
+    };
+
+    fn later(p: *Preview, ms: u32, retry: bool) void {
+        const timer = std.heap.page_allocator.create(Timer) catch return;
+        timer.* = .{ .preview = p, .generation = p.generation, .retry = retry };
+        nanoui.App.after(ms, timer, Timer.fire);
+    }
+
     fn make(p: *Preview, window: *nanoui.Window) ?objc.Object {
         const surface = window.surface orelse return null;
         const host = objc.msg(?objc.Object, surface.nsview, "superview", .{}) orelse return null;
@@ -94,11 +167,53 @@ pub const Preview = struct {
         });
         const delegate = objc.msg(objc.Object, cls, "new", .{});
         objc.msg(void, web, "setUIDelegate:", .{delegate});
+        const nav_cls = objc.defineClass(.{
+            .name = "SamSearchPreviewNavigation",
+            .protocols = &.{"WKNavigationDelegate"},
+            .methods = &.{
+                .{ .name = "webView:didFinishNavigation:", .imp = &loaded, .types = "v@:@@" },
+                .{ .name = "webView:didFailNavigation:withError:", .imp = &loadFailed, .types = "v@:@@@" },
+                .{ .name = "webView:didFailProvisionalNavigation:withError:", .imp = &loadFailed, .types = "v@:@@@" },
+            },
+        });
+        const nav = objc.msg(objc.Object, nav_cls, "new", .{});
+        objc.setZig(nav, p);
+        objc.msg(void, web, "setNavigationDelegate:", .{nav});
+        p.navigation_delegate = nav;
         // Above the panel's drawing (a subview added last is on top).
         objc.msg(void, host, "addSubview:", .{web});
         p.web = web;
         p.ui_delegate = delegate;
         return web;
+    }
+
+    /// Asks the Quick Ask page to hand its conversation (history and the
+    /// answer so far) to the floating window. `done` hears whether it did;
+    /// an older helper without `openAnswerWindow` says no.
+    pub fn moveAnswer(p: *Preview, done: Moved) void {
+        const web = p.web orelse return done.func(done.ctx, false);
+        if (p.moving != null) return;
+        p.moving = done;
+        p.move_generation = p.generation;
+        const pool = objc.Pool.push();
+        defer pool.pop();
+        const world = objc.msg(objc.Object, objc.class("WKContentWorld"), "pageWorld", .{});
+        var block = objc.Block(Preview, &.{ ?objc.Object, ?objc.Object }).init(p, moved);
+        objc.msg(void, web, "callAsyncJavaScript:arguments:inFrame:inContentWorld:completionHandler:", .{
+            objc.nsString("return await window.openAnswerWindow()"),
+            @as(?objc.Object, null),
+            @as(?objc.Object, null),
+            world,
+            @as(*anyopaque, @ptrCast(&block)),
+        });
+    }
+
+    fn moved(p: *Preview, _: ?objc.Object, err: ?objc.Object) void {
+        const m = p.moving orelse return;
+        p.moving = null;
+        // The page went away meanwhile: nothing left to hand over.
+        if (p.generation != p.move_generation) return;
+        m.func(m.ctx, err == null);
     }
 
     /// Escape, ⌘↩ and ⌘[ while a page shows, before whoever has the keys.
@@ -125,6 +240,21 @@ pub const Preview = struct {
         return null;
     }
 };
+
+fn loaded(obj: objc.Object, _: objc.SEL, _: objc.Object, nav: ?objc.Object) callconv(.c) void {
+    const p = objc.getZig(Preview, obj) orelse return;
+    if (nav != null and nav == p.navigation) {
+        p.state = .shown;
+        p.navigation = null;
+    }
+}
+
+fn loadFailed(obj: objc.Object, _: objc.SEL, _: objc.Object, nav: ?objc.Object, err: objc.Object) callconv(.c) void {
+    const p = objc.getZig(Preview, obj) orelse return;
+    if (nav == null or nav != p.navigation) return;
+    if (objc.msg(objc.NSInteger, err, "code", .{}) == -999) return;
+    p.failed();
+}
 
 /// A link that asks for a new window loads here instead.
 fn newWindow(_: objc.Object, _: objc.SEL, web: objc.Object, _: objc.Object, action: objc.Object, _: objc.Object) callconv(.c) ?objc.Object {

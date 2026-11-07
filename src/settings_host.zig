@@ -5,15 +5,22 @@
 const shortcut = @import("shortcut.zig");
 const account = @import("account.zig");
 
+pub const LoginState = enum { off, on, requires_approval };
+
 pub const SettingsHost = struct {
     ctx: *anyopaque,
     choice: *const fn (ctx: *anyopaque) shortcut.Choice,
     apply: *const fn (ctx: *anyopaque, c: shortcut.Choice) void,
+    /// Registers first; a failure leaves the old shortcut in use.
+    try_apply: ?*const fn (ctx: *anyopaque, c: shortcut.Choice) anyerror!void = null,
     /// Starts or stops recording a key of one's own: the keys pressed go
     /// to `Settings.took`, not the panel (recorder.zig).
     record: *const fn (ctx: *anyopaque, on: bool) void,
     /// Whether it opens at login; `set` changes it first.
     login: *const fn (ctx: *anyopaque, set: ?bool) bool,
+    /// Rich login status, refreshed on show and after a change.
+    login_status: ?*const fn (ctx: *anyopaque, set: ?bool) LoginState = null,
+    login_settings: ?*const fn (ctx: *anyopaque) void = null,
     /// Google's suggestions turned on or off in Settings.
     suggest: *const fn (ctx: *anyopaque, on: bool) void,
     /// Return sends Google searches to the browser (on) or the panel.

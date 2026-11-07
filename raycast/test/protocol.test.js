@@ -95,7 +95,7 @@ test("list and no-view fixtures speak the protocol", async () => {
   const exitMsg = await hud.waitFor((m) => m.type === "exit");
   assert.equal(exitMsg.type, "exit");
   hud.child.kill();
-  await new Promise((resolve) => hud.child.on("close", resolve));
+  if (hud.child.exitCode == null && !hud.child.signalCode) await new Promise((resolve) => hud.child.on("close", resolve));
 });
 
 test("view command renders, filters, pushes, copies and opens", async () => {

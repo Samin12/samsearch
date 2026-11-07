@@ -9,7 +9,7 @@ pub fn items(a: ?*account.Account, label: []u8, click: nanoui.menu.Click, terms:
     const who: []const u8 = if (acct.email().len > 0) acct.email() else "your Codegraff account";
     return switch (acct.state) {
         .signed_out => .{ .{ .label = "Sign In with Codegraff to Sync Across Macs…", .click = click }, .{ .label = "Codegraff Terms & Privacy", .click = terms } },
-        .starting => .{ .{ .label = "Signing In…", .disabled = true }, .{ .label = "Codegraff Terms & Privacy", .click = terms } },
+        .starting => .{ .{ .label = "Signing In… (Click to Cancel)", .click = click }, .{ .label = "Codegraff Terms & Privacy", .click = terms } },
         .waiting => .{ .{ .label = "Approve in Your Browser… (Click to Cancel)", .click = click }, .{ .label = "Codegraff Terms & Privacy", .click = terms } },
         .signed_in => .{
             .{ .label = std.fmt.bufPrint(label, "Synced as {s}", .{who}) catch "Synced", .disabled = true },

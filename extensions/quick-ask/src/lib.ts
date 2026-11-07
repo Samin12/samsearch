@@ -56,7 +56,7 @@ const FRONT_WINDOW_JXA = `
 ObjC.import('CoreGraphics');
 function run() {
   const list = ObjC.deepUnwrap(ObjC.castRefToObject($.CGWindowListCopyWindowInfo($.kCGWindowListOptionOnScreenOnly | $.kCGWindowListExcludeDesktopElements, $.kCGNullWindowID)));
-  const skip = /^(Nanolight|Window Server|Dock|Control Center|SystemUIServer|Notification Center|Spotlight)$/;
+  const skip = /^(SamSearch|Nanolight|Window Server|Dock|Control Center|SystemUIServer|Notification Center|Spotlight)$/;
   for (const w of list) {
     const b = w.kCGWindowBounds || {};
     if (w.kCGWindowLayer !== 0 || skip.test(w.kCGWindowOwnerName || '') || (b.Width || 0) < 200 || (b.Height || 0) < 150) continue;

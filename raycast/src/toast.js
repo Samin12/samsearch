@@ -2,6 +2,8 @@
 
 const { send, request } = require("./protocol");
 
+let nextToastId = 0;
+
 const ToastStyle = {
   Success: "success",
   Failure: "failure",
@@ -11,6 +13,8 @@ const ToastStyle = {
 class Toast {
   constructor(options) {
     const opts = options || {};
+    this.id = ++nextToastId;
+    this.visible = false;
     this.style = opts.style || ToastStyle.Success;
     this.title = opts.title || "";
     this.message = opts.message || "";
@@ -18,8 +22,17 @@ class Toast {
     this.secondaryAction = opts.secondaryAction;
   }
 
+  get title() { return this._title; }
+  set title(value) { this._title = value; if (this.visible) this.show(); }
+  get message() { return this._message; }
+  set message(value) { this._message = value; if (this.visible) this.show(); }
+  get style() { return this._style; }
+  set style(value) { this._style = value; if (this.visible) this.show(); }
+
   show() {
+    this.visible = true;
     send({
+      id: this.id,
       type: "toast",
       style: normalizeStyle(this.style),
       title: String(this.title || ""),
@@ -29,6 +42,8 @@ class Toast {
   }
 
   hide() {
+    this.visible = false;
+    send({ type: "toast_hide", id: this.id });
     return Promise.resolve();
   }
 }
@@ -58,6 +73,8 @@ function showHUD(title) {
   return Promise.resolve();
 }
 
+// SamSearch currently has no confirmation dialog. The Zig request handler
+// rejects this request explicitly; callers must not treat it as approval.
 async function confirmAlert(options) {
   const opts = options || {};
   const result = await request("confirm", {
@@ -68,7 +85,7 @@ async function confirmAlert(options) {
   });
   if (typeof result === "boolean") return result;
   if (result && typeof result === "object" && "confirmed" in result) return !!result.confirmed;
-  return true;
+  return false;
 }
 
 function openExtensionPreferences() {

@@ -6,36 +6,53 @@ const suggest = @import("suggest.zig");
 const Live = @import("main.zig").Live;
 const mac = @import("builtin").os.tag == .macos;
 
-/// File lookups share the suggestions' pause and keep at most one worker.
+/// A new query cancels the old Spotlight round within its next poll.
 pub fn askFiles(ctx: *anyopaque, q: []const u8) void {
     if (!mac or q.len >= files.max_path) return;
     const l: *Live = @ptrCast(@alignCast(ctx));
+    if (l.files.active) |a| a.cancel.store(true, .release);
+    l.files.active = null;
+    if (l.s.pipeline.status(.files) != .pending) return;
     @memcpy(l.files.query[0..q.len], q);
     l.files.len = q.len;
-    l.files.epoch +%= 1;
-    l.files.waiting += 1;
-    nanoui.App.after(suggest.pause_ms, l, struct {
-        fn f(c: ?*anyopaque) callconv(.c) void {
-            const live: *Live = @ptrCast(@alignCast(c.?));
-            live.files.waiting -= 1;
-            if (live.files.waiting == 0) sendFiles(live);
-        }
-    }.f);
+    l.files.generation = l.s.pipeline.generation;
+    const timer = l.app.gpa.create(Timer) catch {
+        l.s.filesAnsweredGeneration(l.s.pipeline.generation, null);
+        return;
+    };
+    timer.* = .{ .live = l, .generation = l.files.generation };
+    nanoui.App.after(suggest.pause_ms, timer, Timer.done);
 }
 
+const Timer = struct {
+    live: *Live,
+    generation: u64,
+
+    fn done(ctx: ?*anyopaque) callconv(.c) void {
+        const timer: *Timer = @ptrCast(@alignCast(ctx.?));
+        const l = timer.live;
+        const generation = timer.generation;
+        l.app.gpa.destroy(timer);
+        if (generation == l.files.generation) sendFiles(l);
+    }
+};
+
 fn sendFiles(l: *Live) void {
-    if (!mac or l.files.busy or l.files.waiting > 0 or l.files.sent == l.files.epoch or !l.s.files_on) return;
+    if (!mac or l.files.active != null or l.files.sent == l.files.generation or !l.s.files_on or l.files.generation != l.s.pipeline.generation) return;
     const q = l.files.query[0..l.files.len];
-    if (!std.mem.eql(u8, q, std.mem.trim(u8, l.s.query.text(), " \t\r\n"))) return;
-    const a = l.app.gpa.create(FileAsk) catch return;
-    a.* = .{ .live = l, .len = q.len, .epoch = l.files.epoch, .found = .{ .allocator = l.app.gpa } };
+    const a = l.app.gpa.create(FileAsk) catch {
+        l.s.filesAnsweredGeneration(l.files.generation, null);
+        return;
+    };
+    a.* = .{ .live = l, .len = q.len, .generation = l.files.generation, .found = .{ .allocator = l.app.gpa } };
     @memcpy(a.text[0..q.len], q);
     a.locations = l.kv.get(l.app.gpa, files.locations_key) catch null;
     a.exclusions = l.kv.get(l.app.gpa, files.exclusions_key) catch null;
-    l.files.busy = true;
-    l.files.sent = l.files.epoch;
+    l.files.active = a;
+    l.files.sent = l.files.generation;
     const thread = std.Thread.spawn(.{}, FileAsk.run, .{a}) catch {
-        l.files.busy = false;
+        l.files.active = null;
+        l.s.filesAnsweredGeneration(a.generation, null);
         a.destroy();
         return;
     };
@@ -47,7 +64,8 @@ const FileAsk = struct {
     live: *Live,
     text: [files.max_path]u8 = undefined,
     len: usize,
-    epoch: u64,
+    generation: u64,
+    cancel: files.Cancel = .init(false),
     locations: ?[]u8 = null,
     exclusions: ?[]u8 = null,
     found: files.List = .{},
@@ -58,8 +76,8 @@ const FileAsk = struct {
         if (files.isPath(q)) {
             files.complete(a.live.app.io, q, &a.found);
             a.ok = true;
-        } else a.ok = files.find(a.live.app.io, q, a.locations orelse "", a.exclusions orelse "", &a.found);
-        if (a.ok) a.found.icons();
+        } else a.ok = files.findCancelable(a.live.app.io, q, a.locations orelse "", a.exclusions orelse "", &a.found, &a.cancel);
+        if (a.ok and !a.cancel.load(.acquire)) a.found.icons();
         nanoui.App.after(0, a, done);
     }
 
@@ -67,12 +85,11 @@ const FileAsk = struct {
         const a: *FileAsk = @ptrCast(@alignCast(ctx.?));
         const l = a.live;
         defer a.destroy();
-        l.files.busy = false;
-        if (a.ok and a.epoch == l.files.epoch) {
-            l.s.filesAnswered(a.text[0..a.len], &a.found);
+        if (l.files.active == a) l.files.active = null;
+        if (!a.cancel.load(.acquire)) {
+            l.s.filesAnsweredGeneration(a.generation, if (a.ok) &a.found else null);
             if (l.window) |w| w.redraw();
         }
-        sendFiles(l);
     }
 
     fn destroy(a: *FileAsk) void {
@@ -87,10 +104,9 @@ const FileAsk = struct {
 pub const State = struct {
     query: [files.max_path]u8 = undefined,
     len: usize = 0,
-    waiting: u32 = 0,
-    epoch: u64 = 0,
+    generation: u64 = 0,
     sent: u64 = 0,
-    busy: bool = false,
+    active: ?*FileAsk = null,
 };
 
 pub fn load(l: *Live) void {

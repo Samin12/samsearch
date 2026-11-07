@@ -169,3 +169,24 @@ pub fn remember(w: *nanoui.Window) void {
         .y = visible.origin.y + visible.size.height - (frame.origin.y + frame.size.height - view.shadow_margin),
     });
 }
+
+/// Catch panel commands before a web view, recorder or main menu handles them.
+pub fn watchKeys(ctx: anytype, comptime hide: fn (@TypeOf(ctx)) void) void {
+    const T = @TypeOf(ctx.*);
+    const Handler = struct {
+        fn key(l: *T, ev: objc.Object) ?objc.Object {
+            const w = l.window orelse return ev;
+            if (!w.isVisible() or !w.isFocused()) return ev;
+            const cmd = objc.msg(objc.NSUInteger, ev, "modifierFlags", .{}) & (1 << 20) != 0;
+            // The letter typed, not the key's place: Q isn't key 12 on every layout.
+            const chars = objc.fromNSString(objc.msg(?objc.Object, ev, "charactersIgnoringModifiers", .{}));
+            if (cmd and std.ascii.eqlIgnoreCase(chars, "q")) {
+                hide(l);
+                return null;
+            }
+            return ev;
+        }
+    };
+    var block = objc.BlockRet(T, &.{objc.Object}, ?objc.Object).init(ctx, Handler.key);
+    _ = objc.msg(?objc.Object, objc.class("NSEvent"), "addLocalMonitorForEventsMatchingMask:handler:", .{ @as(u64, 1 << 10), @as(*anyopaque, @ptrCast(&block)) });
+}

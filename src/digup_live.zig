@@ -8,38 +8,57 @@ const Live = @import("main.zig").Live;
 pub const State = struct {
     query: [digup.max_query]u8 = undefined,
     len: usize = 0,
-    epoch: u64 = 0,
-    sent: u64 = 0,
-    waiting: u32 = 0,
-    busy: bool = false,
+    generation: u64 = 0,
+    sent: ?u64 = null,
+    active: ?*Ask = null,
+    attempt: u8 = 0,
 };
 
-/// Every changed query invalidates the previous answer, including empty ones.
+/// Supersede immediately; the cancelled callback owns its cleanup.
 pub fn ask(ctx: *anyopaque, query: []const u8) void {
     const l: *Live = @ptrCast(@alignCast(ctx));
+    if (l.digup.active) |a| objc.msg(void, a.session.?, "invalidateAndCancel", .{});
+    l.digup.active = null;
     const q = std.mem.trim(u8, query, " \t\r\n");
-    l.digup.epoch +%= 1;
+    l.digup.generation = l.s.pipeline.generation;
+    l.digup.attempt = 0;
+    l.digup.sent = null;
     l.digup.len = if (l.s.digup_on and digup.eligible(q)) q.len else 0;
+    if (l.digup.len == 0) return;
     @memcpy(l.digup.query[0..l.digup.len], q[0..l.digup.len]);
-    l.digup.waiting += 1;
-    nanoui.App.after(@import("suggest.zig").pause_ms, l, struct {
-        fn f(c: ?*anyopaque) callconv(.c) void {
-            const live: *Live = @ptrCast(@alignCast(c.?));
-            live.digup.waiting -= 1;
-            if (live.digup.waiting == 0) send(live);
-        }
-    }.f);
+    const timer = l.app.gpa.create(Timer) catch {
+        l.s.digupAnsweredGeneration(l.digup.generation, null);
+        return;
+    };
+    timer.* = .{ .live = l, .generation = l.digup.generation };
+    nanoui.App.after(@import("suggest.zig").pause_ms, timer, Timer.done);
 }
 
+const Timer = struct {
+    live: *Live,
+    generation: u64,
+
+    fn done(ctx: ?*anyopaque) callconv(.c) void {
+        const timer: *Timer = @ptrCast(@alignCast(ctx.?));
+        const l = timer.live;
+        const generation = timer.generation;
+        l.app.gpa.destroy(timer);
+        if (generation == l.digup.generation) send(l);
+    }
+};
+
 fn send(l: *Live) void {
-    if (l.digup.busy or l.digup.waiting > 0 or l.digup.sent == l.digup.epoch or !l.s.digup_on or l.digup.len == 0) return;
+    if (l.digup.active != null or l.digup.sent == l.digup.generation or
+        !l.s.digup_on or l.digup.len == 0 or l.digup.generation != l.s.pipeline.generation) return;
     const q = l.digup.query[0..l.digup.len];
-    if (!std.mem.eql(u8, q, std.mem.trim(u8, l.s.query.text(), " \t\r\n"))) return;
-    const a = l.app.gpa.create(Ask) catch return;
-    a.* = .{ .live = l, .len = q.len, .epoch = l.digup.epoch, .started = std.Io.Clock.awake.now(l.app.io).toMilliseconds(), .found = .{ .found = .{ .allocator = l.app.gpa } } };
+    const a = l.app.gpa.create(Ask) catch {
+        l.s.digupAnsweredGeneration(l.digup.generation, null);
+        return;
+    };
+    a.* = .{ .live = l, .len = q.len, .generation = l.digup.generation, .found = .{ .found = .{ .allocator = l.app.gpa } } };
     @memcpy(a.text[0..q.len], q);
-    l.digup.busy = true;
-    l.digup.sent = l.digup.epoch;
+    l.digup.active = a;
+    l.digup.sent = l.digup.generation;
     const pool = objc.Pool.push();
     defer pool.pop();
     const config = objc.msg(objc.Object, objc.class("NSURLSessionConfiguration"), "ephemeralSessionConfiguration", .{});
@@ -68,8 +87,8 @@ const Ask = struct {
     live: *Live,
     text: [digup.max_query]u8 = undefined,
     len: usize,
-    epoch: u64,
-    started: i64,
+    generation: u64,
+    timed_out: bool = false,
     session: ?objc.Object = null,
     found: digup.List,
     ok: bool = false,
@@ -85,7 +104,7 @@ const Ask = struct {
                 if (a.ok) a.found.found.icons();
             };
         }
-        if (std.Io.Clock.awake.now(a.live.app.io).toMilliseconds() - a.started > 1500) a.ok = false;
+        if (err) |e| a.timed_out = objc.msg(objc.NSInteger, e, "code", .{}) == -1001;
         nanoui.App.after(0, a, done);
     }
 
@@ -98,11 +117,16 @@ const Ask = struct {
             a.found.deinit();
             l.app.gpa.destroy(a);
         }
-        l.digup.busy = false;
-        if (a.ok and a.epoch == l.digup.epoch) {
-            l.s.digupAnswered(a.text[0..a.len], &a.found);
-            if (l.window) |w| w.redraw();
+        if (l.digup.active != a) return;
+        l.digup.active = null;
+        if (a.generation != l.s.pipeline.generation or !l.s.digup_on) return;
+        if (digup.retry(a.timed_out, l.digup.attempt)) {
+            l.digup.attempt += 1;
+            l.digup.sent = null;
+            send(l);
+            return;
         }
-        send(l);
+        l.s.digupAnsweredGeneration(a.generation, if (a.ok) &a.found else null);
+        if (l.window) |w| w.redraw();
     }
 };

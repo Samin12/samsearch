@@ -41,7 +41,8 @@ if (require.main === module) {
     log(err && err.stack ? err.stack : message);
     if (process.argv[2] === "run" || process.argv[2] === "store") send({ type: "error", message });
     else process.stdout.write(JSON.stringify({ ok: false, error: message }) + "\n");
-    process.exit(1);
+    // Let the protocol error reach Zig before the pipe closes.
+    process.stdout.write("", () => process.exit(1));
   });
 }
 

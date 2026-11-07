@@ -8,40 +8,26 @@ const hostConfig = require("./host-config");
 
 const Reconciler = ReactReconciler(hostConfig);
 
-const session = {
-  container: null,
-  root: null,
-  scheduled: false,
-  lastJson: "",
-  currentView: null,
-  searchText: "",
-  selectedId: null,
-  formValues: {},
-  dropdownValue: null,
-  dropdownFired: false,
-};
-let container = null;
-let root = null;
-let scheduled = false;
-let lastJson = "";
-let currentView = null;
-let searchText = "";
-let selectedId = null;
-let formValues = session.formValues;
-let dropdownValue = null;
-let dropdownFired = false;
-const actionRegistry = new Map();
-let actionSeq = 0;
+let nextViewId = 0;
+const mounted = new Map();
+let session = null;
+
+function newSession(entry) {
+  return {
+    id: ++nextViewId, entry, container: null, root: null, scheduled: false,
+    lastJson: "", currentView: null, searchText: "", selectedId: null,
+    formValues: {}, dropdownFired: new WeakSet(), actions: new Map(),
+    actionRoots: new Map(), actionIds: new WeakMap(), nextAction: 0, renderGeneration: 0, previousActions: new Map(), error: null,
+  };
+}
 
 function scheduleRender() {
-  if (session.scheduled) return;
-  session.scheduled = true;
+  if (!session || session.scheduled) return;
+  const target = session;
+  target.scheduled = true;
   setTimeout(() => {
-    session.scheduled = false;
-    container = session.container;
-    root = session.root;
-    if (container && !container.root && session.tree) container.root = session.tree;
-    flushRender();
+    target.scheduled = false;
+    if (session === target) flushRender();
   }, 16);
 }
 
@@ -57,25 +43,21 @@ function findAll(node, type, out) {
   return out;
 }
 
-function actionId(prefix, index, title) {
-  const slug = String(title || "Action")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-|-$/g, "");
-  return prefix + ":" + index + ":" + (slug || "action");
+function actionId(prefix, identity) {
+  return session.id + ":" + prefix + ":" + encodeURIComponent(identity);
 }
 
 function collectActions(node, prefix) {
   const actions = [];
   if (!node) return actions;
-  let index = 0;
   const walk = (n) => {
     if (!n || n.type === "#text") return;
     if (n.type === "Action") {
       const props = n.props || {};
-      const id = actionId(prefix || "actions", index, props.title);
-      index += 1;
-      actionRegistry.set(id, props);
+      let identity = props.id || session.actionIds.get(n);
+      if (!identity) { identity = "action-" + (++session.nextAction); session.actionIds.set(n, identity); }
+      const id = actionId(prefix || "actions", identity);
+      session.actions.set(id, props);
       actions.push({
         id,
         title: props.title || "Action",
@@ -108,12 +90,19 @@ function itemFrom(node, index) {
 
 function actionsFromElement(element, prefix) {
   if (!element || typeof element !== "object") return [];
-  const scratch = { root: null, onCommit() {} };
-  const fiberRoot = Reconciler.createContainer(scratch, 0, null, false, null, "", () => {}, null);
-  Reconciler.updateContainerSync(element, fiberRoot, null);
+  const key = prefix || "actions";
+  let scratch = session.actionRoots.get(key);
+  if (!scratch) {
+    scratch = { root: null, onCommit() {} };
+    const target = session;
+    const onError = (error) => reportRenderError(error, target);
+    scratch.fiber = Reconciler.createContainer(scratch, 0, null, false, null, "", onError, onError, onError);
+    session.actionRoots.set(key, scratch);
+  }
+  scratch.generation = session.renderGeneration;
+  Reconciler.updateContainerSync(element, scratch.fiber, null);
   Reconciler.flushSyncWork();
-  Reconciler.flushPassiveEffects();
-  return scratch.root ? collectActions(scratch.root, prefix || "actions") : [];
+  return scratch.root ? collectActions(scratch.root, key) : [];
 }
 
 function serializeList(node, kind) {
@@ -151,7 +140,9 @@ function serializeList(node, kind) {
     loading: !!props.isLoading,
     sections,
     empty,
-    selected: selectedId,
+    selected: props.selectedItemId !== undefined ? props.selectedItemId : session.selectedId,
+    searchText: props.searchText !== undefined ? String(props.searchText) : session.searchText,
+    searchControlled: props.searchText !== undefined,
     actions: listActions,
     filtering: props.filtering !== false,
     hasSearchHandler: typeof props.onSearchTextChange === "function",
@@ -215,12 +206,14 @@ function serializeForm(node) {
           options.push({ value: String(c.props.value ?? ""), title: String(c.props.title ?? c.props.value ?? "") });
         }
       }
-      const stored = Object.prototype.hasOwnProperty.call(formValues, id) ? formValues[id] : undefined;
-      let value = stored !== undefined ? stored : p.value !== undefined ? p.value : p.defaultValue;
-      if (value === undefined) value = t === "checkbox" ? false : "";
+      const stored = Object.prototype.hasOwnProperty.call(session.formValues, id) ? session.formValues[id] : undefined;
+      let value = p.value !== undefined ? p.value : stored !== undefined ? stored : p.defaultValue;
+      if (value === undefined) value = t === "checkbox" ? false : t === "dropdown" && options.length ? options[0].value : "";
+      session.formValues[id] = value;
       fields.push({
         id,
         type: t,
+        controlled: p.value !== undefined,
         title: p.title || p.label || "",
         value,
         placeholder: p.placeholder || "",
@@ -273,7 +266,7 @@ function applySearch(view) {
   if (typeof props.onSearchTextChange === "function" || props.filtering === false) {
     return strip(view);
   }
-  const q = (searchText || "").trim().toLowerCase();
+  const q = (view.searchText || "").trim().toLowerCase();
   if (!q) return strip(view);
   const sections = view.sections.map((section) => ({
     title: section.title,
@@ -319,9 +312,9 @@ function strip(view) {
 }
 
 function wireActions(view) {
-  if (view.kind === "list" && selectedId) {
+  if (view.kind === "list" && session.selectedId) {
     for (const section of view.sections) {
-      const item = section.items.find((it) => it.id === selectedId);
+      const item = section.items.find((it) => it.id === session.selectedId);
       if (item && item.actions && item.actions.length) view.actions = item.actions;
     }
   }
@@ -329,64 +322,100 @@ function wireActions(view) {
 }
 
 function flushRender() {
-  container = session.container;
-  root = session.root;
-  actionSeq = 0;
-  actionRegistry.clear();
-  const hostNode = container && container.root;
-  if (!hostNode) return;
-  let view = serialize(hostNode);
-  view = wireActions(view);
-  view = applySearch(view);
+  if (!session) return;
+  session.previousActions = session.actions;
+  session.actions = new Map();
+  session.renderGeneration++;
+  const hostNode = session.container && session.container.root;
+  if (!hostNode && !session.error) return;
+  let view = session.error ? {
+    kind: "detail", title: "Error", markdown: "# Error\n\n" + session.error,
+    actions: [], loading: false,
+  } : applySearch(wireActions(serialize(hostNode)));
   if (!view.selected && view.kind === "list") {
     const first = view.sections.flatMap((s) => s.items)[0];
     view.selected = first ? first.id : null;
   }
-  currentView = view;
+  for (const [key, scratch] of session.actionRoots) {
+    if (scratch.generation !== session.renderGeneration) {
+      Reconciler.updateContainerSync(null, scratch.fiber, null);
+      session.actionRoots.delete(key);
+    }
+  }
+  Reconciler.flushSyncWork();
+  view.viewId = session.id;
+  session.currentView = view;
   const json = JSON.stringify(view);
-  if (json === lastJson) return;
-  lastJson = json;
-  const { send } = require("./protocol");
-  send({ type: "render", view });
+  if (json === session.lastJson) return;
+  session.lastJson = json;
+  require("./protocol").send({ type: "render", view });
+  if (!session.error) initDropdown(hostNode);
+}
+
+function dispose(target) {
+  Reconciler.updateContainerSync(null, target.root, null);
+  for (const scratch of target.actionRoots.values()) {
+    Reconciler.updateContainerSync(null, scratch.fiber, null);
+  }
+  Reconciler.flushSyncWork();
+  target.actions.clear();
+  target.actionRoots.clear();
+}
+
+function activate() {
+  const entries = new Set(nav.stack);
+  for (const [entry, target] of mounted) {
+    if (!entries.has(entry)) { dispose(target); mounted.delete(entry); }
+  }
+  const entry = nav.topEntry();
+  if (!entry) return;
+  let target = mounted.get(entry);
+  if (!target) {
+    target = newSession(entry);
+    mounted.set(entry, target);
+    target.container = { root: null, onCommit: () => { if (session === target) scheduleRender(); } };
+    target.root = Reconciler.createContainer(target.container, 1, null, false, null, "ss", (err) => reportRenderError(err, target), (err) => reportRenderError(err, target), (err) => reportRenderError(err, target));
+    session = target;
+    update(entry.element);
+  } else {
+    session = target;
+    force();
+  }
 }
 
 function mount(element) {
-  container = { root: null, onCommit: scheduleRender };
-  session.container = container;
-  root = Reconciler.createContainer(container, 1, null, false, null, "nl", () => {}, null);
-  session.root = root;
-  nav.setNavigator(() => {
-    const topEl = nav.top();
-    if (topEl) update(topEl);
-  });
-  update(element);
+  if (!nav.topEntry()) nav.reset(element);
+  nav.setNavigator(activate);
+  activate();
 }
 
 function update(element) {
-  Reconciler.updateContainer(element, root, null, () => {
-    if (session.container && session.container.root) session.tree = session.container.root;
-  });
+  Reconciler.updateContainer(element, session.root, null);
 }
 
-function reportRenderError(error) {
+function reportRenderError(error, target = session) {
   const { log, send } = require("./protocol");
   log("render error", error && error.stack ? error.stack : error);
-  send({ type: "error", message: error && error.message ? error.message : String(error) });
+  target.error = error && error.message ? error.message : String(error);
+  target.actions.clear();
+  send({ type: "error", message: target.error });
+  if (target === session) scheduleRender();
 }
 
 function force() {
-  lastJson = "";
+  session.lastJson = "";
   flushRender();
 }
 
 function setSearch(text) {
-  searchText = text == null ? "" : String(text);
-  const node = container && container.root;
+  session.searchText = text == null ? "" : String(text);
+  session.selectedId = null;
+  const node = session.container && session.container.root;
   const props = findSearchProps(node);
   if (props && typeof props.onSearchTextChange === "function") {
-    props.onSearchTextChange(searchText);
+    props.onSearchTextChange(session.searchText);
   }
-  lastJson = "";
+  session.lastJson = "";
   scheduleRender();
 }
 
@@ -401,24 +430,24 @@ function findSearchProps(node) {
 }
 
 function setSelected(id) {
-  selectedId = id;
-  const node = container && container.root;
+  session.selectedId = id;
+  const node = session.container && session.container.root;
   const props = findSearchProps(node);
   if (props && typeof props.onSelectionChange === "function") {
     props.onSelectionChange(id);
   }
-  lastJson = "";
+  session.lastJson = "";
   scheduleRender();
 }
 
 function setField(id, value) {
-  formValues[id] = value;
-  const node = container && container.root;
+  session.formValues[id] = value;
+  const node = session.container && session.container.root;
   const field = findField(node, id);
   if (field && field.props) {
     if (typeof field.props.onChange === "function") field.props.onChange(value);
   }
-  lastJson = "";
+  session.lastJson = "";
   scheduleRender();
 }
 
@@ -433,12 +462,13 @@ function findField(node, id) {
 }
 
 function runActionById(id) {
-  const props = actionRegistry.get(id);
+  if (session.error) return;
+  const props = session.actions.get(id) || session.previousActions.get(id);
   if (!props) return;
   if (props.__action === "Action.SubmitForm") {
-    const node = container && container.root;
+    const node = session.container && session.container.root;
     const form = findForm(node);
-    const values = { ...formValues };
+    const values = { ...session.formValues };
     if (form && form.props && typeof form.props.onSubmit === "function") {
       Promise.resolve(form.props.onSubmit(values)).catch((err) => {
         const { send } = require("./protocol");
@@ -450,7 +480,7 @@ function runActionById(id) {
     return;
   }
   runAction(props);
-  lastJson = "";
+  session.lastJson = "";
   scheduleRender();
 }
 
@@ -465,36 +495,15 @@ function findForm(node) {
 }
 
 function initDropdown(node) {
-  if (!node || dropdownFired) return;
-  const props = node.props || {};
-  const accessory = props.searchBarAccessory;
-  if (accessory && accessory.props && !dropdownFired) {
-    if (accessory.props.defaultValue != null && typeof accessory.props.onChange === "function") {
-      dropdownValue = accessory.props.defaultValue;
-      dropdownFired = true;
-      queueMicrotask(() => accessory.props.onChange(dropdownValue));
-      return;
-    }
-  }
+  if (!node || session.dropdownFired.has(node)) return;
   if (node.type === "List.Dropdown" || node.type === "Grid.Dropdown") {
+    session.dropdownFired.add(node);
     const props = node.props || {};
-    if (props.defaultValue != null) {
-      dropdownValue = props.defaultValue;
-      dropdownFired = true;
-      if (typeof props.onChange === "function") {
-        const { log } = require("./protocol");
-        log("dropdown", dropdownValue);
-        queueMicrotask(() => {
-          try {
-            props.onChange(dropdownValue);
-          } catch (err) {
-            const { send, log } = require("./protocol");
-            log(err && err.stack ? err.stack : err);
-            send({ type: "error", message: err && err.message ? err.message : String(err) });
-          }
-        });
-      }
-      return;
+    const value = props.value !== undefined ? props.value : props.defaultValue;
+    if (value !== undefined && typeof props.onChange === "function") {
+      queueMicrotask(() => {
+        try { props.onChange(value); } catch (err) { reportRenderError(err); }
+      });
     }
   }
   for (const c of node.children || []) initDropdown(c);
@@ -510,6 +519,7 @@ module.exports = {
   runActionById,
   scheduleRender,
   initDropdown,
-  getView: () => currentView,
-  getRoot: () => (container ? container.root : null),
+  getView: () => session && session.currentView,
+  getViewId: () => session && session.id,
+  getRoot: () => (session && session.container ? session.container.root : null),
 };

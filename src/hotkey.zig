@@ -45,3 +45,10 @@ pub fn taken(choice: Choice) bool {
 pub fn unavailable() ?[]const u8 {
     return if (@hasDecl(impl, "unavailable")) impl.unavailable() else null;
 }
+
+/// Acquire before releasing, so a failed replacement keeps the working handle.
+pub fn replace(comptime Backend: type, backend: Backend, old: ?Backend.Handle) !Backend.Handle {
+    const next = try backend.acquire();
+    if (old) |handle| backend.release(handle);
+    return next;
+}

@@ -15,35 +15,19 @@ pub fn takeFile(s: *Nanolight, i: usize) void {
     s.query.want_selection = .{ text.len, text.len };
 }
 
-/// A Spotlight answer lands only for the query still in the field.
+/// Worker answers carry the query generation, never a text comparison.
+pub fn filesAnsweredGeneration(s: *Nanolight, generation: u64, found: ?*files.List) void {
+    s.rebuild();
+    if (!s.files_on or !s.pipeline.finish(generation, .files, if (found != null) .answered else .failed)) return;
+    const was = s.selectedKey();
+    if (found) |list| s.found.replace(list) else s.found.deinit();
+    s.refillSelected(was);
+}
+
 pub fn filesAnswered(s: *Nanolight, typed: []const u8, found: *files.List) void {
-    if (!s.files_on or !std.mem.eql(u8, typed, std.mem.trim(u8, s.query.text(), " \t\r\n"))) return;
-    const was: ?Row = if (s.sel < s.res.n) s.res.rows[s.sel] else null;
-    var path: [files.max_path]u8 = undefined;
-    var path_len: usize = 0;
-    if (was) |r| if (r.kind == .file) {
-        const p = s.found.entries[r.file].path();
-        @memcpy(path[0..p.len], p);
-        path_len = p.len;
-    };
-    s.found.replace(found);
-    s.fill();
-    s.sel = 0;
-    const r = was orelse return;
-    for (s.res.slice(), 0..) |now, i| {
-        if (now.kind != r.kind) continue;
-        const same = switch (r.kind) {
-            .app, .pane => now.app == r.app,
-            .file => std.mem.eql(u8, s.found.entries[now.file].path(), path[0..path_len]),
-            .suggest => now.web == r.web,
-            .digup_hit => now.file == r.file,
-            else => true,
-        };
-        if (same) {
-            s.sel = i;
-            return;
-        }
-    }
+    if (!std.mem.eql(u8, typed, std.mem.trim(u8, s.query.text(), " \t\r\n"))) return;
+    s.rebuild();
+    filesAnsweredGeneration(s, s.pipeline.generation, found);
 }
 
 pub fn row(s: *Nanolight, c: *ui.Context, p: Palette, i: usize, r: Row) void {
@@ -75,8 +59,14 @@ pub fn rebuild(s: *Nanolight) void {
         (files.isPath(q) or (files.eligible(q) and @import("calc.zig").eval(q) == null)))
     {
         s.found.filter(q);
+        if (s.host) |host| if (host.files) |ask| {
+            s.pipeline.set(.files, .pending);
+            ask(host.ctx, q);
+        };
+    } else {
+        s.found.deinit();
         if (s.host) |host| if (host.files) |ask| ask(host.ctx, q);
-    } else s.found.deinit();
+    }
 }
 
 pub fn takeOnTab(s: *Nanolight, c: *ui.Context) bool {

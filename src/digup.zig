@@ -50,6 +50,11 @@ pub fn email(path: []const u8) ?Email {
     return .{ .subject = subject, .account = account, .date = folder[0..10] };
 }
 
+/// Cold helper startup gets one retry, only for a transport timeout.
+pub fn retry(timed_out: bool, attempt: u8) bool {
+    return timed_out and attempt == 0;
+}
+
 pub fn eligible(q: []const u8) bool {
     if (q.len > max_query or (std.unicode.utf8CountCodepoints(q) catch return false) < 3) return false;
     for (q) |c| if (c < 0x20 or c == 0x7f) return false;

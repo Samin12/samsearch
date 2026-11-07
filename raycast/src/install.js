@@ -5,6 +5,49 @@ const path = require("path");
 const { spawn } = require("child_process");
 const { downloadExtension, parseRef } = require("./github");
 
+let activeInstall = null;
+
+function cancelInstall() {
+  const active = activeInstall;
+  if (!active) return;
+  active.cancelled = true;
+  active.controller.abort();
+  for (const child of active.children) {
+    try {
+      if (process.platform === "win32") child.kill("SIGKILL");
+      else process.kill(-child.pid, "SIGKILL");
+    } catch {}
+  }
+  fs.rmSync(active.tmp, { recursive: true, force: true });
+  fs.rmSync(active.lock, { force: true });
+}
+
+process.once("exit", cancelInstall);
+process.once("SIGTERM", () => { cancelInstall(); process.exit(0); });
+process.once("SIGINT", () => { cancelInstall(); process.exit(0); });
+
+function checkCancelled() {
+  if (activeInstall && activeInstall.cancelled) throw new Error("Extension install cancelled");
+}
+
+function replaceBundle(built, dest) {
+  // Carry legacy data forward too, for bundles not yet opened/migrated.
+  for (const name of ["local-storage.json", "support", "preferences.json"]) {
+    const old = path.join(dest, name);
+    if (fs.existsSync(old)) fs.cpSync(old, path.join(built, name), { recursive: true });
+  }
+  const backup = dest + ".previous-" + process.pid;
+  const existed = fs.existsSync(dest);
+  if (existed) fs.renameSync(dest, backup);
+  try {
+    fs.renameSync(built, dest);
+  } catch (err) {
+    if (existed) fs.renameSync(backup, dest);
+    throw err;
+  }
+  fs.rmSync(backup, { recursive: true, force: true });
+}
+
 function readJson(file) {
   return JSON.parse(fs.readFileSync(file, "utf8"));
 }
@@ -41,19 +84,25 @@ function run(cmd, args, cwd, extraEnv) {
   if (cmd === "npm") cmd = npmCommand();
   const shell = process.platform === "win32" && /\.cmd$/i.test(cmd);
   return new Promise((resolve, reject) => {
+    checkCancelled();
+    const owner = activeInstall;
     const child = spawn(shell ? '"' + cmd + '"' : cmd, args, {
       cwd,
       shell,
       env: Object.assign({}, process.env, { PATH: path.dirname(process.execPath) + path.delimiter + (process.env.PATH || process.env.Path || "") }, extraEnv || {}),
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
+      detached: process.platform !== "win32",
     });
+    if (owner) owner.children.add(child);
+    child.stdout.resume();
     let stderr = "";
     child.stderr.on("data", (c) => {
       stderr += c.toString();
     });
     child.on("error", reject);
     child.on("close", (code) => {
+      if (owner) owner.children.delete(child);
       if (code === 0) resolve(stderr);
       else reject(new Error(cmd + " " + args.join(" ") + " failed (" + code + "): " + stderr.slice(-1200)));
     });
@@ -88,13 +137,28 @@ function copyAssets(src, dest) {
 }
 
 async function installExtension(nameOrRef, extensionsDir) {
+  if (activeInstall) throw new Error("An extension install is already running");
   const parsed = parseRef(nameOrRef);
   const name = parsed.name;
   const dest = path.join(path.resolve(extensionsDir), name);
   const tmp = path.join(path.resolve(extensionsDir), ".tmp-" + name + "-" + Date.now());
   fs.mkdirSync(path.resolve(extensionsDir), { recursive: true });
+  const lock = path.join(path.resolve(extensionsDir), ".install.lock");
   try {
-    await downloadExtension(name, tmp);
+    fs.writeFileSync(lock, String(process.pid), { flag: "wx" });
+  } catch (err) {
+    if (err.code !== "EEXIST") throw err;
+    const pid = Number(fs.readFileSync(lock, "utf8"));
+    let alive = true;
+    try { process.kill(pid, 0); } catch (error) { if (error.code === "ESRCH") alive = false; }
+    if (alive) throw new Error("An extension install is already running");
+    fs.rmSync(lock, { force: true });
+    fs.writeFileSync(lock, String(process.pid), { flag: "wx" });
+  }
+  activeInstall = { tmp, lock, cancelled: false, children: new Set(), controller: new AbortController() };
+  try {
+    await downloadExtension(name, tmp, activeInstall.controller.signal);
+    checkCancelled();
     const pkgPath = path.join(tmp, "package.json");
     if (!fs.existsSync(pkgPath)) throw new Error("Downloaded extension has no package.json");
     const pkg = readJson(pkgPath);
@@ -143,8 +207,8 @@ async function installExtension(nameOrRef, extensionsDir) {
     }
     fs.copyFileSync(pkgPath, path.join(built, "package.json"));
     copyAssets(path.join(tmp, "assets"), path.join(built, "assets"));
-    fs.rmSync(dest, { recursive: true, force: true });
-    fs.renameSync(built, dest);
+    checkCancelled();
+    replaceBundle(built, dest);
     return {
       ok: true,
       name: pkg.name || name,
@@ -152,6 +216,9 @@ async function installExtension(nameOrRef, extensionsDir) {
       commands: commandEntry(pkg),
     };
   } finally {
+    activeInstall.controller.abort();
+    fs.rmSync(lock, { force: true });
+    activeInstall = null;
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 }
@@ -190,4 +257,4 @@ function removeExtension(name, extensionsDir) {
   return { ok: true, name: parsed.name };
 }
 
-module.exports = { installExtension, listExtensions, removeExtension };
+module.exports = { installExtension, listExtensions, removeExtension, cancelInstall, replaceBundle };

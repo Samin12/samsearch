@@ -9,6 +9,7 @@
 //   quickask://t3-thread-create?q=…   a new T3 Code thread with default settings, then jump to it
 //   quickask://answer?q=…             the same answer page in a floating window
 import Cocoa
+import Darwin
 import Network
 import QuickLookThumbnailing
 import Vision
@@ -26,6 +27,11 @@ let GITHUB_OWNERS = ["Samin12", "AI-Answer", "creatorauthority"]
 let HANDOFF = "@@T3"
 let SHOTS = home + "/Library/Caches/samin-quick-ask"
 let LOG = home + "/Library/Logs/QuickAsk.log"
+let STARTED = Int(Date().timeIntervalSince1970)
+let ACTION_TOKEN = UUID().uuidString + UUID().uuidString
+let SERVER_ONLY = CommandLine.arguments.contains("--serve-codes")
+// A child can exit between checking isRunning and writing its pipe.
+signal(SIGPIPE, SIG_IGN)
 
 func log(_ s: String) {
     let line = "\(Date()) \(s)\n"
@@ -45,20 +51,39 @@ func apiKey() -> String {
 }
 
 @discardableResult
-func run(_ cmd: String, _ args: [String], input: String? = nil, cwd: String? = nil) -> (code: Int32, out: String, err: String) {
+func run(_ cmd: String, _ args: [String], input: String? = nil, cwd: String? = nil,
+         environment: [String: String]? = nil, timeout: TimeInterval = 8, cancelled: () -> Bool = { false }) -> (code: Int32, out: String, err: String) {
+    if cancelled() { return (-2, "", "Cancelled") }
+    // Files avoid pipe deadlocks, including descendants that inherit stdout after the child exits.
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("quickask-run-" + UUID().uuidString)
+    do { try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700]) }
+    catch { return (-1, "", error.localizedDescription) }
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let output = dir.appendingPathComponent("out"), errors = dir.appendingPathComponent("err"), source = dir.appendingPathComponent("in")
+    FileManager.default.createFile(atPath: output.path, contents: nil)
+    FileManager.default.createFile(atPath: errors.path, contents: nil)
+    try? Data((input ?? "").utf8).write(to: source)
+    guard let out = try? FileHandle(forWritingTo: output), let err = try? FileHandle(forWritingTo: errors),
+          let inp = try? FileHandle(forReadingFrom: source) else { return (-1, "", "Couldn't create command files") }
+    defer { try? out.close(); try? err.close(); try? inp.close() }
     let p = Process()
-    p.executableURL = URL(fileURLWithPath: cmd)
-    p.arguments = args
+    p.executableURL = URL(fileURLWithPath: cmd); p.arguments = args
+    if let environment { p.environment = environment }
     if let cwd { p.currentDirectoryURL = URL(fileURLWithPath: cwd) }
-    let out = Pipe(), err = Pipe(), inp = Pipe()
     p.standardOutput = out; p.standardError = err; p.standardInput = inp
     do { try p.run() } catch { return (-1, "", error.localizedDescription) }
-    if let input { inp.fileHandleForWriting.write(input.data(using: .utf8)!) }
-    try? inp.fileHandleForWriting.close()
-    let o = out.fileHandleForReading.readDataToEndOfFile()
-    let e = err.fileHandleForReading.readDataToEndOfFile()
-    p.waitUntilExit()
-    return (p.terminationStatus, String(decoding: o, as: UTF8.self), String(decoding: e, as: UTF8.self))
+    let deadline = Date().addingTimeInterval(timeout)
+    while p.isRunning && Date() < deadline && !cancelled() { Thread.sleep(forTimeInterval: 0.02) }
+    let stopped = p.isRunning
+    if stopped {
+        p.terminate()
+        let grace = Date().addingTimeInterval(0.2)
+        while p.isRunning && Date() < grace { Thread.sleep(forTimeInterval: 0.01) }
+        if p.isRunning { kill(p.processIdentifier, SIGKILL) }
+    }
+    let o = (try? Data(contentsOf: output)) ?? Data(), e = (try? Data(contentsOf: errors)) ?? Data()
+    return (stopped ? -2 : p.terminationStatus, String(decoding: o, as: UTF8.self),
+            stopped ? (cancelled() ? "Cancelled" : "Command timed out") : String(decoding: e, as: UTF8.self))
 }
 
 func jsonData(_ v: Any) -> Data { (try? JSONSerialization.data(withJSONObject: v)) ?? Data("{}".utf8) }
@@ -107,14 +132,16 @@ function run() {
 
 func captureScreen() -> Screen? {
     try? FileManager.default.createDirectory(atPath: SHOTS, withIntermediateDirectories: true)
-    let path = "\(SHOTS)/screen-\(Int(Date().timeIntervalSince1970 * 1000)).jpg"
+    let path = "\(SHOTS)/screen-\(UUID().uuidString).jpg"
+    guard CGPreflightScreenCaptureAccess() else { return nil }
     var id: Int?, app = "Screen", title = ""
     let r = run("/usr/bin/osascript", ["-l", "JavaScript", "-e", FRONT_WINDOW_JXA])
     if let d = r.out.trimmingCharacters(in: .whitespacesAndNewlines).data(using: .utf8),
        let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any] {
         id = j["id"] as? Int; app = j["app"] as? String ?? app; title = j["title"] as? String ?? ""
     }
-    run("/usr/sbin/screencapture", ["-x", "-t", "jpg"] + (id.map { ["-o", "-l\($0)"] } ?? ["-m"]) + [path])
+    let shot = run("/usr/sbin/screencapture", ["-x", "-t", "jpg"] + (id.map { ["-o", "-l\($0)"] } ?? ["-m"]) + [path], timeout: 5)
+    guard shot.code == 0 else { try? FileManager.default.removeItem(atPath: path); return nil }
     guard FileManager.default.fileExists(atPath: path) else {
         log("screenshot failed (Screen Recording permission?)")
         return nil
@@ -197,34 +224,110 @@ func describe(_ s: Screen, maxText: Int) -> String {
 
 /// Screens captured when a page opened, so the answer uses what was in front at that moment,
 /// not the launcher. Keyed by the page's session id.
+final class TurnJob {
+    let id: String
+    private let lock = NSLock()
+    private var stopped = false
+    private var moved = false
+    private var task: Task<Void, Never>?
+    init(_ id: String) { self.id = id }
+    var cancelled: Bool { lock.lock(); defer { lock.unlock() }; return stopped }
+    func attach(_ task: Task<Void, Never>) {
+        lock.lock(); self.task = task; let stop = stopped; lock.unlock()
+        if stop { task.cancel() }
+    }
+    func cancel(disconnected: Bool = false) {
+        lock.lock()
+        if disconnected && moved { lock.unlock(); return }
+        stopped = true; let task = self.task; lock.unlock()
+        task?.cancel()
+    }
+    func transfer() { lock.lock(); moved = true; lock.unlock() }
+}
+
 final class Sessions {
     static let shared = Sessions()
     private let lock = NSLock()
-    private var screens: [String: Screen?] = [:]
+    private var screens: [String: Screen] = [:]
+    private var ready = Set<String>()
     private var waiting: [String: [(Screen?) -> Void]] = [:]
+    private var conversations: [String: [[String: Any]]] = [:]
+    private var jobs: [String: TurnJob] = [:]
+    private var touched: [String: Date] = [:]
 
-    func capture() -> String {
+    func capture(_ capture: @escaping () -> Screen? = captureScreen) -> String {
         let id = UUID().uuidString
-        lock.lock(); waiting[id] = []; lock.unlock()
-        DispatchQueue.global(qos: .userInitiated).async {
-            let s = captureScreen()
-            self.lock.lock()
-            self.screens[id] = s
-            let calls = self.waiting.removeValue(forKey: id) ?? []
-            self.lock.unlock()
-            calls.forEach { $0(s) }
-        }
+        lock.lock()
+        let old = touched.filter { Date().timeIntervalSince($0.value) > 1800 }.map(\.key)
+        for sid in old where jobs[sid] == nil { conversations.removeValue(forKey: sid); touched.removeValue(forKey: sid) }
+        conversations[id] = []; touched[id] = Date(); waiting[id] = []
+        lock.unlock()
+        DispatchQueue.global(qos: .userInitiated).async { self.captured(id, capture()) }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 20) { self.captured(id, nil) }
         return id
     }
 
-    /// The screen for `id`, as soon as it's captured.
+    private func captured(_ id: String, _ s: Screen?) {
+        lock.lock()
+        guard let calls = waiting.removeValue(forKey: id) else {
+            lock.unlock(); if let s { try? FileManager.default.removeItem(atPath: s.path) }; return
+        }
+        if let s { screens[id] = s }; ready.insert(id)
+        lock.unlock()
+        calls.forEach { $0(s) }
+        // Pages that never submit a turn must not keep a capture forever.
+        DispatchQueue.global().asyncAfter(deadline: .now() + 60) { self.releaseScreen(id) }
+    }
+
     func screen(_ id: String, _ done: @escaping (Screen?) -> Void) {
         lock.lock()
-        if let s = screens[id] { lock.unlock(); done(s); return }
+        if ready.contains(id) { let s = screens[id]; lock.unlock(); done(s); return }
         if waiting[id] != nil { waiting[id]!.append(done); lock.unlock(); return }
-        lock.unlock()
-        done(nil)
+        lock.unlock(); done(nil)
     }
+
+    func releaseScreen(_ id: String) {
+        lock.lock(); let s = screens.removeValue(forKey: id); ready.remove(id)
+        let calls = waiting.removeValue(forKey: id) ?? []; lock.unlock()
+        if let s { try? FileManager.default.removeItem(atPath: s.path) }
+        calls.forEach { $0(nil) }
+    }
+
+    func exists(_ id: String) -> Bool { lock.lock(); defer { lock.unlock() }; return conversations[id] != nil }
+    func history(_ id: String) -> [Turn] {
+        lock.lock(); defer { lock.unlock() }
+        return (conversations[id] ?? []).filter { $0["state"] as? String == "done" }.map {
+            Turn(question: $0["q"] as? String ?? "", answer: $0["a"] as? String ?? "")
+        }
+    }
+    func snapshot(_ id: String) -> [[String: Any]] {
+        lock.lock(); defer { lock.unlock() }
+        if conversations[id] != nil { touched[id] = Date() }
+        return conversations[id] ?? []
+    }
+    func begin(_ sid: String, _ job: TurnJob, _ q: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard conversations[sid] != nil, jobs[sid] == nil else { return false }
+        jobs[sid] = job; touched[sid] = Date()
+        conversations[sid, default: []].append(["id": job.id, "q": q, "a": "", "state": "thinking"])
+        return true
+    }
+    func update(_ sid: String, _ id: String, text: String? = nil, state: String? = nil, detail: String? = nil) {
+        lock.lock(); defer { lock.unlock() }
+        guard let i = conversations[sid]?.firstIndex(where: { $0["id"] as? String == id }) else { return }
+        if let text { conversations[sid]?[i]["a"] = text }
+        if let state { conversations[sid]?[i]["state"] = state }
+        if let detail { conversations[sid]?[i]["detail"] = detail }
+    }
+    func finish(_ sid: String, _ id: String) {
+        lock.lock(); if jobs[sid]?.id == id { jobs.removeValue(forKey: sid) }; lock.unlock()
+        releaseScreen(sid)
+    }
+    func cancel(_ sid: String, _ id: String?, disconnected: Bool = false) {
+        lock.lock(); let job = jobs[sid]; lock.unlock()
+        if id == nil || job?.id == id { job?.cancel(disconnected: disconnected) }
+    }
+    func transfer(_ sid: String) { lock.lock(); let job = jobs[sid]; lock.unlock(); job?.transfer() }
 }
 
 // MARK: - Fast model
@@ -260,23 +363,33 @@ final class Knowledge {
     private var card: [String] = []
     private var repos: [[String: String]] = []
     private var fetchedAt = Date.distantPast
+    private var attemptedAt = Date.distantPast
+    private var fetching = false
 
     func refresh() {
-        guard Date().timeIntervalSince(fetchedAt) > 30 * 60 else { return }
-        fetchedAt = Date()
+        lock.lock()
+        guard !fetching, Date().timeIntervalSince(fetchedAt) > 30 * 60,
+              Date().timeIntervalSince(attemptedAt) > 30 else { lock.unlock(); return }
+        fetching = true; attemptedAt = Date(); lock.unlock()
         DispatchQueue.global(qos: .utility).async {
-            let card = (honcho("GET", "/peers/samin/card", nil) as? [String: Any])?["peer_card"] as? [String] ?? []
-            var repos: [[String: String]] = []
+            let fetchedCard = (honcho("GET", "/peers/samin/card", nil) as? [String: Any])?["peer_card"] as? [String]
+            let card = fetchedCard ?? []
+            var repos: [[String: String]] = [], reposSucceeded = true
             for owner in GITHUB_OWNERS {
                 let r = run(GH, ["repo", "list", owner, "--limit", "300", "--json", "nameWithOwner,description,url,updatedAt"])
-                for item in (try? JSONSerialization.jsonObject(with: Data(r.out.utf8)) as? [[String: Any]]) ?? [] {
+                guard r.code == 0, let items = try? JSONSerialization.jsonObject(with: Data(r.out.utf8)) as? [[String: Any]] else {
+                    reposSucceeded = false; continue
+                }
+                for item in items {
                     repos.append(["name": item["nameWithOwner"] as? String ?? "", "url": item["url"] as? String ?? "",
                                   "about": item["description"] as? String ?? "", "updated": item["updatedAt"] as? String ?? ""])
                 }
             }
             self.lock.lock()
-            if !card.isEmpty { self.card = card }
-            if !repos.isEmpty { self.repos = repos }
+            self.fetching = false
+            if fetchedCard != nil && reposSucceeded { self.fetchedAt = Date() }
+            if let fetchedCard { self.card = fetchedCard }
+            if reposSucceeded { self.repos = repos }
             self.lock.unlock()
             log("knowledge: \(card.count) card lines, \(repos.count) repos")
         }
@@ -346,7 +459,8 @@ func runTool(_ name: String, _ input: [String: Any]) -> String {
         let sem = DispatchSemaphore(value: 0)
         var reply: [String: Any]?
         DigUp.shared.search(q) { reply = $0; sem.signal() }
-        _ = sem.wait(timeout: .now() + 20)
+        guard sem.wait(timeout: .now() + 30) == .success else { return "DigUp is still starting or the search timed out. Please retry." }
+        if let error = reply?["error"] as? String { return error }
         let hits = (reply?["hits"] as? [[String: Any]] ?? []).prefix(6)
         return hits.isEmpty ? "DigUp found nothing." : hits.map { h in
             let ex = (h["excerpt"] as? String ?? "").replacingOccurrences(of: "«", with: "").replacingOccurrences(of: "»", with: "").prefix(240)
@@ -354,6 +468,7 @@ func runTool(_ name: String, _ input: [String: Any]) -> String {
         }.joined(separator: "\n")
     case "chrome_tabs":
         let r = run("/usr/bin/osascript", ["-e", """
+        if application "Google Chrome" is not running then return ""
         set out to ""
         tell application "Google Chrome"
           repeat with w in windows
@@ -388,11 +503,12 @@ func agentAnswer(_ question: String, history: [Turn], screen: Screen?, allowHand
     var full = ""
 
     for _ in 0..<4 {
+        try Task.checkCancellation()
         let body: [String: Any] = [
             "model": MODEL, "max_tokens": 4096, "thinking": ["type": "disabled"], "stream": true,
             "system": system, "messages": messages, "tools": TOOLS,
         ]
-        var req = URLRequest(url: URL(string: PROXY + "/v1/messages")!)
+        var req = URLRequest(url: URL(string: PROXY + "/v1/messages")!, timeoutInterval: 45)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "content-type")
         req.setValue(apiKey(), forHTTPHeaderField: "x-api-key")
@@ -410,6 +526,7 @@ func agentAnswer(_ question: String, history: [Turn], screen: Screen?, allowHand
         var toolJSON: [Int: String] = [:]
         var stop = ""
         for try await line in bytes.lines {
+            try Task.checkCancellation()
             guard line.hasPrefix("data:"), let d = String(line.dropFirst(5)).data(using: .utf8),
                   let ev = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { continue }
             let i = ev["index"] as? Int ?? 0
@@ -452,7 +569,9 @@ func agentAnswer(_ question: String, history: [Turn], screen: Screen?, allowHand
                 b["input"] = input
                 let name = b["name"] as? String ?? ""
                 let t0 = Date()
+                try Task.checkCancellation()
                 let out = runTool(name, input)
+                try Task.checkCancellation()
                 log("tool \(name)(\(input["query"] as? String ?? "")) \(Int(Date().timeIntervalSince(t0) * 1000))ms")
                 results.append(["type": "tool_result", "tool_use_id": b["id"] as? String ?? "", "content": out])
             } else if (b["text"] as? String ?? "").isEmpty {
@@ -463,7 +582,7 @@ func agentAnswer(_ question: String, history: [Turn], screen: Screen?, allowHand
         messages.append(["role": "assistant", "content": assistant])
         messages.append(["role": "user", "content": results])
     }
-    return full
+    throw NSError(domain: "QuickAsk", code: 2, userInfo: [NSLocalizedDescriptionKey: "The answer exceeded the four-step tool limit. Try a narrower question."])
 }
 
 // MARK: - T3 Code
@@ -475,16 +594,17 @@ func taskForT3(_ question: String, history: [Turn], screen: Screen?) -> String {
         parts.append("Context, from a quick chat I had before this:\n\n\(convo)")
     }
     if let s = screen {
-        parts.append("What I was looking at:\n\(describe(s, maxText: 8000))\nScreenshot: \(s.path)")
+        parts.append("What I was looking at:\n\(describe(s, maxText: 8000))")
     }
     return parts.joined(separator: "\n\n")
 }
 
 /// Starts a thread in the default project with its default model and settings, then opens it.
 /// Returns an error message on failure.
-func startT3(_ message: String, title: String) -> String? {
+func startT3(_ message: String, title: String, job: TurnJob? = nil) -> String? {
+    if job?.cancelled == true { return "Cancelled" }
     let t = String((title.split(separator: "\n").first.map(String.init) ?? title).prefix(80))
-    let r = run(T3, ["thread", "start", PROJECT, "-", "--json", "--title", t.isEmpty ? "Quick Ask task" : t], input: message, cwd: PROJECT)
+    let r = run(T3, ["thread", "start", PROJECT, "-", "--json", "--title", t.isEmpty ? "Quick Ask task" : t], input: message, cwd: PROJECT, timeout: 30, cancelled: { job?.cancelled == true })
     if r.code != 0 { return r.err.isEmpty ? "t3 exited with \(r.code)" : r.err }
     var threadId: String?
     if let d = r.out.data(using: .utf8), let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any] {
@@ -496,9 +616,9 @@ func startT3(_ message: String, title: String) -> String? {
     if let threadId, !env.isEmpty,
        let id = threadId.addingPercentEncoding(withAllowedCharacters: .alphanumerics.union(CharacterSet(charactersIn: "-"))),
        let url = URL(string: "t3code://threads/\(env)/\(id)") {
-        DispatchQueue.main.async { NSWorkspace.shared.open(url) }
+        DispatchQueue.main.async { if job?.cancelled != true { NSWorkspace.shared.open(url) } }
     } else {
-        DispatchQueue.main.async { NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/T3 Code (Nightly).app")) }
+        DispatchQueue.main.async { if job?.cancelled != true { NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/T3 Code (Nightly).app")) } }
     }
     log("started T3 thread \(threadId ?? "?") — \(t)")
     return nil
@@ -545,20 +665,29 @@ final class DigUp {
         p.arguments = args
         let out = Pipe(), inp = Pipe()
         p.standardOutput = out; p.standardInput = inp; p.standardError = FileHandle.nullDevice
-        out.fileHandleForReading.readabilityHandler = { [weak self] h in
+        out.fileHandleForReading.readabilityHandler = { [weak self, weak p] h in
             let d = h.availableData
-            self?.queue.async { self?.receive(d) }
-        }
-        p.terminationHandler = { [weak self] _ in
+            if d.isEmpty { h.readabilityHandler = nil }
             self?.queue.async {
-                self?.proc = nil; self?.stdin = nil
-                self?.pending.values.forEach { $0(nil) }
-                self?.pending = [:]
+                guard let self, self.proc === p else { return }
+                self.receive(d)
+            }
+        }
+        p.terminationHandler = { [weak self] child in
+            out.fileHandleForReading.readabilityHandler = nil
+            self?.queue.async {
+                guard let self, self.proc === child else { return }
+                self.proc = nil; self.stdin = nil; self.buffer = Data()
+                let calls = self.pending.values; self.pending = [:]
+                calls.forEach { $0(["error": "DigUp disconnected. Please retry to restart its service."]) }
             }
         }
         do { try p.run() } catch { log("digup failed to start: \(error)"); return }
         proc = p
         stdin = inp.fileHandleForWriting
+        // A wedged service must not block this serial queue's request deadlines.
+        let fd = inp.fileHandleForWriting.fileDescriptor
+        _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
         log("digup search-service started")
     }
 
@@ -581,12 +710,31 @@ final class DigUp {
             self.pending[id] = done
             var req = jsonData(["id": id, "op": "search", "q": q, "meaning": true, "limit": 30])
             req.append(10)
-            stdin.write(req)
-            self.queue.asyncAfter(deadline: .now() + 20) {
-                self.pending.removeValue(forKey: id)?(nil)
+            do { try stdin.write(contentsOf: req) }
+            catch {
+                log("digup pipe closed; restarting service: \(error)")
+                self.proc?.terminate(); self.proc = nil; self.stdin = nil; self.buffer = Data()
+                let calls = self.pending.values; self.pending = [:]
+                calls.forEach { $0(["error": "DigUp restarted after its service disconnected. Please retry."]) }
+            }
+            self.queue.asyncAfter(deadline: .now() + 30) {
+                self.pending.removeValue(forKey: id)?(["error": "DigUp is still starting or the search timed out. Please retry."])
             }
         }
     }
+}
+
+// Permission checks never request consent or start a browser.
+func permissionStatus() -> [String: Any] {
+    var automation: [String: String] = [:]
+    let browsers = CHROMIUM + ["Safari"]
+    for name in browsers {
+        let bundle = NSWorkspace.shared.runningApplications.first { $0.localizedName == name }?.bundleIdentifier
+        automation[name] = bundle.map { codeAutomationState($0) } ?? "unknown"
+    }
+    return ["screenRecording": CGPreflightScreenCaptureAccess() ? "granted" : "denied",
+            "fullDiskAccess": codesDatabaseReadable(home + "/Library/Messages/chat.db") ? "granted" : "denied",
+            "automation": automation]
 }
 
 // MARK: - Local server
@@ -597,12 +745,12 @@ final class Server {
 
     init() throws {
         let params = NWParameters.tcp
-        params.allowLocalEndpointReuse = true
+        params.allowLocalEndpointReuse = false
         params.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: PORT)!)
         listener = try NWListener(using: params)
         listener.newConnectionHandler = { Connection($0).start() }
         listener.stateUpdateHandler = { state in
-            if case .failed(let e) = state { log("server failed: \(e)") }
+            if case .failed(let e) = state { log("server failed: \(e)"); exit(1) }
         }
         listener.start(queue: .global(qos: .userInitiated))
         log("listening on 127.0.0.1:\(PORT)")
@@ -612,11 +760,19 @@ final class Server {
 final class Connection {
     let c: NWConnection
     var data = Data()
+    var job: TurnJob?
+    private let queue = DispatchQueue(label: "quickask.connection")
 
     init(_ c: NWConnection) { self.c = c }
 
     func start() {
-        c.start(queue: .global(qos: .userInitiated))
+        c.stateUpdateHandler = { [weak self] state in
+            switch state {
+            case .cancelled, .failed: self?.job?.cancel(disconnected: true)
+            default: break
+            }
+        }
+        c.start(queue: queue)
         read()
     }
 
@@ -626,17 +782,29 @@ final class Connection {
             if let head = data.range(of: Data("\r\n\r\n".utf8)) {
                 let header = String(decoding: data[..<head.lowerBound], as: UTF8.self)
                 let length = header.split(separator: "\r\n").first { $0.lowercased().hasPrefix("content-length:") }
-                    .flatMap { Int($0.split(separator: ":")[1].trimmingCharacters(in: .whitespaces)) } ?? 0
+                    .flatMap { Int($0.dropFirst("content-length:".count).trimmingCharacters(in: .whitespaces)) } ?? 0
+                guard length >= 0, length <= 1 << 20, data.count <= 2 << 20 else {
+                    return send("413 Content Too Large", "text/plain", Data())
+                }
                 let body = data[head.upperBound...]
-                if body.count >= length { handle(header: header, body: Data(body.prefix(length))); return }
+                if body.count >= length {
+                    handle(header: header, body: Data(body.prefix(length)))
+                    // NWConnection does not report a peer FIN as .cancelled until it is read.
+                    c.receive(minimumIncompleteLength: 1, maximumLength: 1) { [self] _, _, closed, error in
+                        if closed || error != nil { job?.cancel(disconnected: true) }
+                    }
+                    return
+                }
             }
             if done || err != nil { c.cancel(); return }
+            if data.count > 2 << 20 { return send("413 Content Too Large", "text/plain", Data()) }
             read()
         }
     }
 
-    func send(_ status: String, _ type: String, _ body: Data) {
-        var out = Data("HTTP/1.1 \(status)\r\nContent-Type: \(type)\r\nContent-Length: \(body.count)\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n".utf8)
+    func send(_ status: String, _ type: String, _ body: Data, policy: String? = nil) {
+        let extra = policy.map { "Content-Security-Policy: \($0)\r\n" } ?? ""
+        var out = Data("HTTP/1.1 \(status)\r\nContent-Type: \(type)\r\nContent-Length: \(body.count)\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n\(extra)Connection: close\r\n\r\n".utf8)
         out.append(body)
         c.send(content: out, completion: .contentProcessed { [c] _ in c.cancel() })
     }
@@ -648,7 +816,9 @@ final class Connection {
 
     func streamLine(_ v: [String: Any]) {
         var d = jsonData(v); d.append(10)
-        c.send(content: d, completion: .idempotent)
+        c.send(content: d, completion: .contentProcessed { [weak self] error in
+            if error != nil { self?.job?.cancel(disconnected: true) }
+        })
     }
 
     func endStream() {
@@ -674,19 +844,53 @@ final class Connection {
         }
         // Actions need a header a cross-site page can't send without a preflight we never answer.
         if path.hasPrefix("/api/"), headers["x-quickask"] != "1" { return send("403 Forbidden", "text/plain", Data()) }
+        let mutations = ["/api/open", "/api/t3", "/api/open-url", "/api/ask", "/api/copy", "/api/cancel", "/api/float"]
+        if mutations.contains(path), headers["x-quickask-token"] != ACTION_TOKEN {
+            return send("401 Unauthorized", "application/json", jsonData(["error": "Missing or expired Quick Ask token"]))
+        }
+        if let origin = headers["origin"], origin != "http://127.0.0.1:\(PORT)" && origin != "http://localhost:\(PORT)" {
+            return send("403 Forbidden", "text/plain", Data())
+        }
         let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] ?? [:]
 
         switch (method, path) {
+        case ("GET", "/health"):
+            send("200 OK", "application/json", jsonData(["ok": true, "pid": getpid(), "started": STARTED,
+                 "version": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown"]))
+        case ("GET", "/api/status"):
+            send("200 OK", "application/json", jsonData(permissionStatus()))
+        case ("GET", "/api/session"):
+            let sid = query["sid"] ?? ""
+            guard Sessions.shared.exists(sid) else { return send("404 Not Found", "application/json", jsonData(["error": "Conversation expired"])) }
+            send("200 OK", "application/json", jsonData(["turns": Sessions.shared.snapshot(sid)]))
+        case ("POST", "/api/cancel"):
+            Sessions.shared.cancel(json["sid"] as? String ?? "", json["turn"] as? String, disconnected: json["disconnected"] as? Bool == true)
+            send("200 OK", "application/json", jsonData(["ok": true]))
+        case ("POST", "/api/float"):
+            let sid = json["sid"] as? String ?? ""
+            guard !SERVER_ONLY, Sessions.shared.exists(sid) else { return send("404 Not Found", "application/json", jsonData(["error": "Conversation expired"])) }
+            Sessions.shared.transfer(sid)
+            DispatchQueue.main.async { FloatingAnswer.shared.open(question: "", session: sid) }
+            send("200 OK", "application/json", jsonData(["ok": true]))
         case ("GET", "/ask"), ("GET", "/digup"), ("GET", "/codes"):
             let page = path == "/ask" ? "ask.html" : path == "/digup" ? "digup.html" : "codes.html"
             guard let url = Bundle.main.url(forResource: page, withExtension: nil),
                   var html = try? String(contentsOf: url, encoding: .utf8) else { return send("404 Not Found", "text/plain", Data()) }
             // Ask captures the screen now, while the window you were in is still in front.
-            let sid = path == "/ask" ? Sessions.shared.capture() : ""
-            if path != "/codes" { Knowledge.shared.refresh() }
-            let boot: [String: Any] = ["q": query["q"] ?? "", "sid": sid, "floating": query["floating"] == "1", "home": home]
-            html = html.replacingOccurrences(of: "/*BOOT*/", with: "window.BOOT = \(String(decoding: jsonData(boot), as: UTF8.self));")
-            send("200 OK", "text/html; charset=utf-8", Data(html.utf8))
+            let resumed = query["sid"].flatMap { Sessions.shared.exists($0) ? $0 : nil }
+            let sid = resumed ?? (path == "/ask" && !SERVER_ONLY ? Sessions.shared.capture() : "")
+            if path == "/ask" && !SERVER_ONLY { Knowledge.shared.refresh() }
+            let nonce = UUID().uuidString
+            let boot: [String: Any] = ["q": resumed == nil ? query["q"] ?? "" : "", "sid": sid,
+                "floating": query["floating"] == "1", "home": home, "token": ACTION_TOKEN,
+                "turns": Sessions.shared.snapshot(sid)]
+            // JSON embedded in a script must not be able to close that script tag.
+            let payload = String(decoding: jsonData(boot), as: UTF8.self).replacingOccurrences(of: "<", with: "\\u003c")
+                .replacingOccurrences(of: "\u{2028}", with: "\\u2028").replacingOccurrences(of: "\u{2029}", with: "\\u2029")
+            html = html.replacingOccurrences(of: "/*BOOT*/", with: "window.BOOT = \(payload);")
+                .replacingOccurrences(of: "<script", with: "<script nonce=\"\(nonce)\"")
+            send("200 OK", "text/html; charset=utf-8", Data(html.utf8), policy:
+                "default-src 'none'; script-src 'self' 'nonce-\(nonce)'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
         case ("GET", "/marked.min.js"):
             guard let url = Bundle.main.url(forResource: "marked.min", withExtension: "js"), let d = try? Data(contentsOf: url) else {
                 return send("404 Not Found", "text/plain", Data())
@@ -706,12 +910,18 @@ final class Connection {
         case ("POST", "/api/ask"):
             ask(json)
         case ("POST", "/api/t3"):
-            let q = json["q"] as? String ?? ""
-            let history = turns(json["history"])
-            Sessions.shared.screen(json["sid"] as? String ?? "") { [self] s in
-                let err = startT3(taskForT3(q, history: history, screen: s), title: json["title"] as? String ?? q)
-                send("200 OK", "application/json", jsonData(err.map { ["error": $0] } ?? ["ok": true]))
+            let q = json["q"] as? String ?? "", sid = json["sid"] as? String ?? ""
+            let control = TurnJob(UUID().uuidString); job = control
+            let task = Task {
+                let s: Screen? = await withCheckedContinuation { continuation in
+                    Sessions.shared.screen(sid) { continuation.resume(returning: $0) }
+                }
+                defer { Sessions.shared.releaseScreen(sid) }
+                guard !control.cancelled else { return send("200 OK", "application/json", jsonData(["cancelled": true])) }
+                let err = startT3(taskForT3(q, history: Sessions.shared.history(sid), screen: s), title: json["title"] as? String ?? q, job: control)
+                send("200 OK", "application/json", jsonData(control.cancelled ? ["cancelled": true] : err.map { ["error": $0] } ?? ["ok": true]))
             }
+            control.attach(task)
         case ("GET", "/api/codes"):
             let minutes = min(1440, max(1, Int(query["minutes"] ?? "30") ?? 30))
             Codes.shared.search(minutes) { [self] reply in
@@ -719,10 +929,15 @@ final class Connection {
             }
         case ("POST", "/api/digup"):
             DigUp.shared.search(json["q"] as? String ?? "") { [self] reply in
-                send("200 OK", "application/json", jsonData(reply ?? ["error": "DigUp didn't answer. Is DigUp installed and indexed?"]))
+                send("200 OK", "application/json", jsonData(reply ?? ["error": FileManager.default.isExecutableFile(atPath: DIGUP) ? "DigUp service is starting or disconnected. Please retry." : "DigUp is not installed."]))
             }
         case ("POST", "/api/open"):
-            let p = json["path"] as? String ?? ""
+            let raw = json["path"] as? String ?? ""
+            guard raw.hasPrefix("/"), !raw.contains("\0") else { return send("403 Forbidden", "application/json", jsonData(["error": "Not a local path"])) }
+            let p = URL(fileURLWithPath: raw).resolvingSymlinksInPath().standardizedFileURL.path
+            guard DigUp.shared.listed(raw) || p == home || p.hasPrefix(home + "/") else {
+                return send("403 Forbidden", "application/json", jsonData(["error": "Path was not returned by DigUp"]))
+            }
             guard FileManager.default.fileExists(atPath: p) else { return send("404 Not Found", "application/json", jsonData(["error": "Not found"])) }
             DispatchQueue.main.async {
                 if json["reveal"] as? Bool == true {
@@ -733,11 +948,11 @@ final class Connection {
             }
             send("200 OK", "application/json", jsonData(["ok": true]))
         case ("POST", "/api/open-url"):
-            guard let u = URL(string: json["url"] as? String ?? ""), ["http", "https"].contains(u.scheme ?? "") else {
+            guard let u = URL(string: json["url"] as? String ?? ""), ["http", "https", "mailto"].contains(u.scheme?.lowercased() ?? "") else {
                 return send("400 Bad Request", "application/json", jsonData(["error": "Not a web link"]))
             }
             DispatchQueue.main.async {
-                if let chrome = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.google.Chrome") {
+                if u.scheme?.lowercased() != "mailto", let chrome = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.google.Chrome") {
                     NSWorkspace.shared.open([u], withApplicationAt: chrome, configuration: NSWorkspace.OpenConfiguration())
                 } else {
                     NSWorkspace.shared.open(u)
@@ -760,50 +975,81 @@ final class Connection {
         (v as? [[String: Any]] ?? []).map { Turn(question: $0["q"] as? String ?? "", answer: $0["a"] as? String ?? "") }
     }
 
-    /// Streams `{screen}`, then `{d: text}` pieces, then `{done}`, `{handoff: title}` (a T3 thread was
-    /// started instead) or `{error}`.
+    /// A turn has one terminal state even after its page disconnects. The retained snapshot
+    /// lets a floating page observe the same task without submitting another question.
     private func ask(_ json: [String: Any]) {
-        let q = json["q"] as? String ?? ""
-        let history = turns(json["history"])
-        let mode = json["mode"] as? String ?? "auto"
+        let q = json["q"] as? String ?? "", sid = json["sid"] as? String ?? ""
+        let id = json["turn"] as? String ?? UUID().uuidString
+        let history = Sessions.shared.history(sid), mode = json["mode"] as? String ?? "auto"
+        let control = TurnJob(id); job = control
+        guard !q.isEmpty, Sessions.shared.begin(sid, control, q) else {
+            return send("409 Conflict", "application/json", jsonData(["error": "Conversation expired or already answering"]))
+        }
         beginStream()
-        Sessions.shared.screen(json["sid"] as? String ?? "") { [self] s in
-            if history.isEmpty {
-                streamLine(["screen": ["app": s?.app ?? "", "title": s?.title ?? "", "how": s?.how ?? "", "ok": s != nil]])
+        streamLine(["turn": id, "sid": sid])
+        let task = Task {
+            defer { Sessions.shared.finish(sid, id); self.endStream() }
+            func terminal(_ state: String, _ detail: String = "") {
+                Sessions.shared.update(sid, id, state: state, detail: detail)
+                var line: [String: Any] = ["turn": id]
+                line[state] = state == "error" || state == "handoff" ? (detail as Any) : (true as Any)
+                self.streamLine(line)
             }
-            if mode == "t3" {
-                let err = startT3(taskForT3(q, history: history, screen: s), title: q)
-                streamLine(err.map { ["error": $0] } ?? ["handoff": q])
-                return endStream()
-            }
-            Task {
-                do {
-                    // Held back until it can't be the hand-off marker.
-                    var held = "", sure = false
-                    let full = try await agentAnswer(q, history: history, screen: s, allowHandoff: mode != "answer", onDelta: { piece in
-                        if sure { self.streamLine(["d": piece]); return }
-                        held += piece
-                        let t = held.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if t.count >= HANDOFF.count || !HANDOFF.hasPrefix(t) {
-                            if !t.hasPrefix(HANDOFF) { sure = true; self.streamLine(["d": held]) }
-                        }
-                    }, onStatus: { self.streamLine(["status": $0]) })
-                    let trimmed = full.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if mode != "answer", trimmed.hasPrefix(HANDOFF) {
-                        let title = trimmed.dropFirst(HANDOFF.count).split(separator: "\n").first.map { $0.trimmingCharacters(in: .whitespaces) } ?? q
-                        let err = startT3(taskForT3(q, history: history, screen: s), title: title.isEmpty ? q : title)
-                        self.streamLine(err.map { ["error": $0] } ?? ["handoff": title.isEmpty ? q : title])
-                    } else {
-                        if !sure, !held.isEmpty { self.streamLine(["d": held]) }
-                        self.streamLine(["done": true])
-                    }
-                } catch {
-                    self.streamLine(["error": error.localizedDescription])
+            do {
+                let s: Screen? = await withCheckedContinuation { continuation in
+                    Sessions.shared.screen(sid) { continuation.resume(returning: $0) }
                 }
-                self.endStream()
+                try Task.checkCancellation()
+                if history.isEmpty {
+                    self.streamLine(["screen": ["app": s?.app ?? "", "title": s?.title ?? "", "how": s?.how ?? "", "ok": s != nil]])
+                }
+                if mode == "t3" {
+                    guard !control.cancelled else { throw CancellationError() }
+                    let err = startT3(taskForT3(q, history: history, screen: s), title: q, job: control)
+                    if control.cancelled { terminal("cancelled") } else if let err { terminal("error", err) } else { terminal("handoff", q) }
+                    return
+                }
+                var held = "", sure = false, displayed = ""
+                let full = try await agentAnswer(q, history: history, screen: s, allowHandoff: mode != "answer", onDelta: { piece in
+                    guard !control.cancelled else { return }
+                    held += piece
+                    let t = held.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !sure && !HANDOFF.hasPrefix(t) && !t.hasPrefix(HANDOFF) { sure = true }
+                    if sure {
+                        let delta = String(held.dropFirst(displayed.count))
+                        displayed = held
+                        Sessions.shared.update(sid, id, text: displayed)
+                        self.streamLine(["d": delta])
+                    }
+                }, onStatus: { status in
+                    held = ""; displayed = ""; sure = false
+                    Sessions.shared.update(sid, id, text: "")
+                    self.streamLine(["status": status])
+                })
+                try Task.checkCancellation()
+                guard !control.cancelled else { throw CancellationError() }
+                let trimmed = full.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.hasPrefix(HANDOFF) {
+                    if mode == "answer" { terminal("error", "The model requested a T3 handoff instead of an answer. Please retry or continue in T3."); return }
+                    let title = trimmed.dropFirst(HANDOFF.count).split(separator: "\n").first.map { $0.trimmingCharacters(in: .whitespaces) } ?? q
+                    let err = startT3(taskForT3(q, history: history, screen: s), title: title.isEmpty ? q : title, job: control)
+                    if control.cancelled { terminal("cancelled") } else if let err { terminal("error", err) } else { terminal("handoff", title.isEmpty ? q : title) }
+                } else if trimmed.isEmpty {
+                    terminal("error", "The model returned no answer. Please retry.")
+                } else {
+                    if !sure { self.streamLine(["d": full]) }
+                    Sessions.shared.update(sid, id, text: full)
+                    terminal("done")
+                }
+            } catch {
+                if control.cancelled || Task.isCancelled { terminal("cancelled") }
+                else { terminal("error", error.localizedDescription) }
             }
         }
+        control.attach(task)
+        DispatchQueue.global().asyncAfter(deadline: .now() + 120) { control.cancel() }
     }
+
 }
 
 // MARK: - Floating window (quickask://answer, and ⌘↩ from SamSearch)
@@ -851,10 +1097,11 @@ final class FloatingAnswer: NSObject, WKScriptMessageHandler, NSWindowDelegate {
         panel.contentView = fx
     }
 
-    func open(question: String) {
+    func open(question: String, session: String? = nil) {
         if panel == nil { setup() }
         var c = URLComponents(string: "http://127.0.0.1:\(PORT)/ask")!
         c.queryItems = [URLQueryItem(name: "q", value: question), URLQueryItem(name: "floating", value: "1")]
+        if let session { c.queryItems?.append(URLQueryItem(name: "sid", value: session)) }
         web.load(URLRequest(url: c.url!))
         let mouse = NSEvent.mouseLocation
         let scr = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) } ?? NSScreen.main!
@@ -888,6 +1135,7 @@ func route(_ url: URL) {
         guard !text.isEmpty else { return }
         DispatchQueue.global(qos: .userInitiated).async {
             let s = captureScreen()
+            defer { if let s { try? FileManager.default.removeItem(atPath: s.path) } }
             if let err = startT3(taskForT3(text, history: [], screen: s), title: text) {
                 log("T3 error: \(err)")
                 DispatchQueue.main.async {
@@ -897,7 +1145,11 @@ func route(_ url: URL) {
             }
         }
     default:
-        FloatingAnswer.shared.open(question: text)
+        let sid = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "sid" }?.value
+        if let sid, Sessions.shared.exists(sid) {
+            Sessions.shared.transfer(sid)
+            FloatingAnswer.shared.open(question: "", session: sid)
+        } else { FloatingAnswer.shared.open(question: text) }
     }
 }
 
@@ -905,9 +1157,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var server: Server?
 
     func applicationDidFinishLaunching(_ n: Notification) {
-        // Screenshots of the window behind need Screen Recording; this puts Quick Ask in that list and asks once.
-        if !CGPreflightScreenCaptureAccess() { CGRequestScreenCaptureAccess() }
-        do { server = try Server() } catch { log("server didn't start: \(error)") }
+        // Permissions are displayed in the page; starting the helper must not show prompts.
+        pruneScreens()
+        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main) { n in
+            if (n.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.bundleIdentifier == "dev.samin.samsearch" { NSApp.terminate(nil) }
+        }
+        do { server = try Server() } catch { log("server didn't start: \(error)"); exit(1) }
         Knowledge.shared.refresh()
         // An Edit menu so copy, paste and select-all work in the pages.
         let main = NSMenu(), appItem = NSMenuItem(), editItem = NSMenuItem()
@@ -930,8 +1185,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+func pruneScreens() {
+    let fm = FileManager.default
+    for name in (try? fm.contentsOfDirectory(atPath: SHOTS)) ?? [] where name.hasPrefix("screen-") && name.hasSuffix(".jpg") {
+        let path = SHOTS + "/" + name
+        let at = (try? fm.attributesOfItem(atPath: path)[.modificationDate]) as? Date ?? .distantPast
+        if Date().timeIntervalSince(at) > 3600 { try? fm.removeItem(atPath: path) }
+    }
+}
+
+func selftestQuickAsk() {
+    let file = FileManager.default.temporaryDirectory.appendingPathComponent("quickask-screen-test-" + UUID().uuidString)
+    try! Data("fixture".utf8).write(to: file)
+    defer { try? FileManager.default.removeItem(at: file) }
+    let sessions = Sessions(), captured = DispatchSemaphore(value: 0)
+    let sid = sessions.capture { Screen(path: file.path, app: "Fixture", title: "") }
+    sessions.screen(sid) { screen in
+        guard screen?.path == file.path else { fatalError("Capture fixture") }
+        captured.signal()
+    }
+    guard captured.wait(timeout: .now() + 1) == .success else { fatalError("Capture wait") }
+    let job = TurnJob("first")
+    guard sessions.begin(sid, job, "Question"), !sessions.begin(sid, TurnJob("duplicate"), "Duplicate") else { fatalError("Duplicate turn") }
+    sessions.update(sid, job.id, text: "Partial answer")
+    sessions.transfer(sid); sessions.cancel(sid, job.id, disconnected: true)
+    guard !job.cancelled, sessions.snapshot(sid).last?["a"] as? String == "Partial answer" else { fatalError("Move retains active answer") }
+    sessions.update(sid, job.id, state: "done"); sessions.finish(sid, job.id)
+    guard sessions.history(sid).last?.answer == "Partial answer", !FileManager.default.fileExists(atPath: file.path) else { fatalError("Conversation retention / screenshot cleanup") }
+    sessions.screen(sid) { screen in if screen != nil { fatalError("Retained screen entry") } }
+    let next = TurnJob("next"), cancelled = DispatchSemaphore(value: 0)
+    guard sessions.begin(sid, next, "Follow-up") else { fatalError("Follow-up after finish") }
+    let task = Task {
+        do { try await Task.sleep(nanoseconds: 2_000_000_000); fatalError("Turn task was not cancelled") }
+        catch { cancelled.signal() }
+    }
+    next.attach(task)
+    sessions.cancel(sid, "first")
+    guard !next.cancelled else { fatalError("Stale cancellation affected next turn") }
+    sessions.cancel(sid, next.id)
+    guard cancelled.wait(timeout: .now() + 1) == .success, next.cancelled else { fatalError("Turn Task cancellation") }
+    sessions.finish(sid, next.id)
+    let pipe = Pipe()
+    try! pipe.fileHandleForReading.close()
+    do { try pipe.fileHandleForWriting.write(contentsOf: Data("request".utf8)); fatalError("Dead pipe accepted write") }
+    catch { /* Ignoring SIGPIPE turns the dead-child race into a recoverable error. */ }
+    try? pipe.fileHandleForWriting.close()
+    print("Quick Ask selftest: conversation transfer, duplicate/stale turn guards, Task cancellation, screenshot cleanup and dead-pipe recovery passed")
+}
+
 // Tests and a server-only check need no app, screen capture or background tools.
-if CommandLine.arguments.contains("--selftest-codes") { selftestCodes(); exit(0) }
+if CommandLine.arguments.contains("--selftest-codes") { selftestCodes(); selftestQuickAsk(); exit(0) }
 if CommandLine.arguments.contains("--serve-codes") {
     do {
         let server = try Server()

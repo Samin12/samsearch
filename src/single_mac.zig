@@ -41,14 +41,49 @@ pub fn quitOthers() usize {
     return n;
 }
 
-/// single.zig's: older copies quit; commands from a second copy aren't
-/// taken on the Mac (its hot key works everywhere).
-pub fn claim(_: @import("single.zig").Listener) usize {
-    return quitOthers();
+const single = @import("single.zig");
+const notification = "com.samin.samsearch.command";
+var listener: ?single.Listener = null;
+var observer: ?objc.Object = null;
+
+pub fn claim(on: single.Listener) usize {
+    const n = quitOthers();
+    listener = on;
+    if (observer == null) {
+        const cls = objc.defineClass(.{
+            .name = "SamSearchCommands",
+            .methods = &.{.{ .name = "command:", .imp = &command, .types = "v@:@" }},
+        });
+        observer = objc.msg(objc.Object, cls, "new", .{});
+        const center = objc.msg(objc.Object, objc.class("NSDistributedNotificationCenter"), "defaultCenter", .{});
+        objc.msg(void, center, "addObserver:selector:name:object:", .{ observer.?, objc.sel("command:"), objc.nsString(notification), ours() });
+    }
+    return n;
 }
 
-pub fn send(_: @import("single.zig").Command) bool {
-    return false;
+fn command(_: objc.Object, _: objc.SEL, note: objc.Object) callconv(.c) void {
+    const l = listener orelse return;
+    const info = objc.msg(objc.Object, note, "userInfo", .{});
+    const value = objc.fromNSString(objc.msg(?objc.Object, info, "objectForKey:", .{objc.nsString("command")}));
+    if (std.mem.eql(u8, value, "toggle")) l.func(l.ctx, .toggle) else if (std.mem.eql(u8, value, "quit")) l.func(l.ctx, .quit);
+}
+
+pub fn send(cmd: single.Command) bool {
+    const pool = objc.Pool.push();
+    defer pool.pop();
+    const id = ours() orelse return false;
+    const list = objc.msg(objc.Object, objc.class("NSRunningApplication"), "runningApplicationsWithBundleIdentifier:", .{id});
+    const me = std.c.getpid();
+    var other = false;
+    for (0..objc.msg(objc.NSUInteger, list, "count", .{})) |i| {
+        const app = objc.msg(objc.Object, list, "objectAtIndex:", .{@as(objc.NSUInteger, i)});
+        if (objc.msg(i32, app, "processIdentifier", .{}) != me) other = true;
+    }
+    if (!other) return false;
+    const info = objc.msg(objc.Object, objc.class("NSDictionary"), "dictionaryWithObject:forKey:", .{ objc.nsString(@tagName(cmd)), objc.nsString("command") });
+    const center = objc.msg(objc.Object, objc.class("NSDistributedNotificationCenter"), "defaultCenter", .{});
+    objc.msg(void, center, "postNotificationName:object:userInfo:deliverImmediately:", .{ objc.nsString(notification), id, info, objc.YES });
+    return true;
 }
 
 test "an app that isn't Nanolight isn't taken for it" {

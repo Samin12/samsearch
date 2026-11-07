@@ -87,7 +87,23 @@ pub const Kind = enum {
     }
 };
 
+/// Owned identity, independent of a source list's order and storage.
+pub const RowKey = struct {
+    kind: Kind,
+    id: u64 = 0,
+
+    pub fn init(kind: Kind, value: []const u8) RowKey {
+        return .{ .kind = kind, .id = std.hash.Wyhash.hash(0, value) };
+    }
+
+    pub fn eql(a: RowKey, b: RowKey) bool {
+        return a.kind == b.kind and a.id == b.id;
+    }
+};
+
 pub const Row = struct {
+    key: RowKey = .{ .kind = .search_web },
+    number: ?u8 = null,
     kind: Kind,
     /// The app's index (`.app`).
     app: u32 = 0,
@@ -114,6 +130,7 @@ pub const Results = struct {
     n: usize = 0,
     /// No query: the apps are suggestions, nothing else is listed.
     suggested: bool = false,
+    stable_numbers: bool = false,
     /// The math's answer, as shown.
     answer_buf: [64]u8 = undefined,
     answer: []const u8 = "",
@@ -136,6 +153,9 @@ pub const Results = struct {
     pub fn buildWithDigup(r: *Results, query_in: []const u8, ix: *const Index, suggestions: []const u32, web: []const []const u8, found: *const files.List, digup_count: usize) void {
         const boost = ix.launches.items;
         r.n = 0;
+        r.stable_numbers = false;
+        r.answer = "";
+        r.hex = "";
         const query = std.mem.trim(u8, query_in, " ");
         r.suggested = query.len == 0;
         if (query.len == 0) {
@@ -237,6 +257,7 @@ pub const Results = struct {
     /// are simply ⌘1 to ⌘9.
     pub fn number(r: *const Results, i: usize) ?u8 {
         if (i >= r.n) return null;
+        if (r.stable_numbers) return r.rows[i].number;
         const handoffs_listed = for (r.slice()) |row| {
             if (row.kind == .quick_ask) break true;
         } else false;

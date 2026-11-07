@@ -39,13 +39,16 @@
 <body>
   <header><span class="key">⌁</span><span class="title">2FA codes</span><span class="count" id="count"></span><label><input type="checkbox" id="older">Show last 24h</label></header>
   <main id="list"><div class="empty">Looking for codes…</div></main>
+  <div id="permissions" role="status" style="font-size:11.5px;padding:0 14px"></div>
   <div class="errors" id="errors" role="status"></div>
   <footer><span>↑↓ move</span><span>↵ copy</span><span>⌘1–⌘9 copy</span><span>esc back</span><span id="feedback" role="status"></span></footer>
 <script>
+  /*BOOT*/
+  const B = window.BOOT || {};
   const list = document.getElementById("list"), count = document.getElementById("count"), older = document.getElementById("older");
   const errors = document.getElementById("errors"), feedback = document.getElementById("feedback");
   const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
-  let hits = [], sel = 0, seq = 0, busy = false, copied = "";
+  let hits = [], sel = 0, seq = 0, busy = false, copied = "", controller = null;
   const until = Date.now() + 120000;
   const when = (t) => {
     const seconds = Math.max(0, Math.floor(Date.now() / 1000 - t));
@@ -75,7 +78,7 @@
     const h = hits[sel];
     if (!h) return;
     try {
-      const response = await fetch("/api/copy", { method: "POST", headers: { "X-QuickAsk": "1", "Content-Type": "application/json" }, body: JSON.stringify({ text: h.code }) });
+      const response = await fetch("/api/copy", { method: "POST", headers: { "X-QuickAsk": "1", "X-QuickAsk-Token": B.token, "Content-Type": "application/json" }, body: JSON.stringify({ text: h.code }) });
       const r = await response.json();
       if (!response.ok || !r.ok) throw new Error("Clipboard unavailable");
       copied = h.id; feedback.textContent = "Copied"; render();
@@ -84,9 +87,12 @@
 
   async function refresh() {
     const my = ++seq;
+    controller?.abort();
+    controller = new AbortController();
+    const current = controller, timeout = setTimeout(() => current.abort(), 12000);
     busy = true;
     try {
-      const response = await fetch(`/api/codes?minutes=${older.checked ? 1440 : 30}`, { headers: { "X-QuickAsk": "1" } });
+      const response = await fetch(`/api/codes?minutes=${older.checked ? 1440 : 30}`, { headers: { "X-QuickAsk": "1" }, signal: current.signal });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const r = await response.json();
       if (my !== seq) return;
@@ -96,7 +102,7 @@
       errors.innerHTML = (r.sources || []).filter((s) => s.error).map((s) => `<div>${esc(s.source)}: ${esc(s.error)}</div>`).join("");
       render();
     } catch (e) { if (my === seq) errors.textContent = `Couldn't refresh codes: ${e.message}`; }
-    finally { if (my === seq) busy = false; }
+    finally { clearTimeout(timeout); if (my === seq) busy = false; }
   }
 
   older.onchange = () => { hits = []; sel = 0; list.innerHTML = '<div class="empty">Looking for codes…</div>'; refresh(); };
@@ -110,7 +116,14 @@
     if (Date.now() >= until) { clearInterval(timer); if (!hits.length) list.innerHTML = '<div class="empty">No recent codes found.</div>'; return; }
     if (!busy) refresh();
   }, 5000);
-  window.addEventListener("pagehide", () => clearInterval(timer));
+  window.addEventListener("pagehide", () => { clearInterval(timer); controller?.abort(); });
+  fetch("/api/status", { headers: { "X-QuickAsk": "1" }, signal: AbortSignal.timeout(3000) }).then((r) => r.json()).then((status) => {
+    const denied = [];
+    if (status.fullDiskAccess === "denied") denied.push("Quick Ask needs Full Disk Access for Messages in System Settings › Privacy & Security");
+    if (status.screenRecording === "denied") denied.push("Quick Ask Screen Recording is not granted");
+    for (const [name, state] of Object.entries(status.automation || {})) if (state === "denied") denied.push(`Quick Ask Automation denied for ${name}`);
+    document.getElementById("permissions").textContent = denied.join(" · ");
+  }).catch(() => {});
   refresh();
 </script>
 </body>

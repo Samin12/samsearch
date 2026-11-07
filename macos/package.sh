@@ -70,6 +70,23 @@ staple() {
   return 1
 }
 
+# The helper is part of every release, with the same version and signing identity.
+mkdir -p "$bundle/Contents/Helpers"
+QUICKASK_APP="$PWD/$bundle/Contents/Helpers/Quick Ask.app" QUICKASK_NO_START=1 QUICKASK_NO_REGISTER=1 \
+  QUICKASK_VERSION="$version" QUICKASK_TARGET="arm64-apple-macos$min_macos" CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}" sh quickask/build.sh
+if [ -n "${CODESIGN_IDENTITY:-}" ]; then
+  # Hardened runtime needs this entitlement for the helper's browser Apple Events.
+  entitlements="$out/quickask-entitlements.plist"
+  cat > "$entitlements" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>com.apple.security.automation.apple-events</key><true/></dict></plist>
+PLIST
+  codesign --force --timestamp --options runtime --entitlements "$entitlements" --sign "$CODESIGN_IDENTITY" "$bundle/Contents/Helpers/Quick Ask.app"
+  rm "$entitlements"
+else
+  sign "$bundle/Contents/Helpers/Quick Ask.app"
+fi
 sign "$bundle"
 if notarizing; then
   ditto -c -k --keepParent "$bundle" "$out/SamSearch.zip"

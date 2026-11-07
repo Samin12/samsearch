@@ -72,7 +72,7 @@ pub const Index = struct {
     launches: std.ArrayList(u16) = .empty,
     /// The app last opened for each query typed ("cal" → Notion Calendar).
     picks: std.ArrayList(Pick) = .empty,
-    icons: std.AutoHashMapUnmanaged(u32, ?Icon) = .empty,
+    icons: std.StringHashMapUnmanaged(?Icon) = .empty,
     /// Listed with an empty query before anything was opened.
     starters: []const []const u8 = default_starters,
 
@@ -87,6 +87,10 @@ pub const Index = struct {
         ix.apps.deinit(ix.gpa);
         ix.names.deinit(ix.gpa);
         ix.launches.deinit(ix.gpa);
+        for (ix.picks.items) |p| {
+            ix.gpa.free(p.query);
+            ix.gpa.free(p.path);
+        }
         ix.picks.deinit(ix.gpa);
         ix.arena.deinit();
     }
@@ -156,11 +160,16 @@ pub const Index = struct {
     /// Alphabetical, case-insensitive; names and counts kept in step.
     pub fn sort(ix: *Index) void {
         const Ctx = struct {
-            pub fn lessThan(_: @This(), a: App, b: App) bool {
-                return std.ascii.lessThanIgnoreCase(a.name, b.name);
+            ix: *Index,
+            pub fn lessThan(c: @This(), a: usize, b: usize) bool {
+                return std.ascii.lessThanIgnoreCase(c.ix.apps.items[a].name, c.ix.apps.items[b].name);
+            }
+            pub fn swap(c: @This(), a: usize, b: usize) void {
+                std.mem.swap(App, &c.ix.apps.items[a], &c.ix.apps.items[b]);
+                std.mem.swap(u16, &c.ix.launches.items[a], &c.ix.launches.items[b]);
             }
         };
-        std.sort.pdq(App, ix.apps.items, Ctx{}, Ctx.lessThan);
+        std.sort.pdqContext(0, ix.apps.items.len, Ctx{ .ix = ix });
         for (ix.apps.items, 0..) |a, i| ix.names.items[i] = a.name;
     }
 
@@ -229,12 +238,25 @@ pub const Index = struct {
     }
 
     fn remember(ix: *Index, query: []const u8, path: []const u8) !void {
-        const a = ix.arena.allocator();
-        for (ix.picks.items) |*p| if (std.ascii.eqlIgnoreCase(p.query, query)) {
-            if (!std.mem.eql(u8, p.path, path)) p.path = try a.dupe(u8, path);
+        const a = ix.gpa;
+        for (ix.picks.items, 0..) |p, i| if (std.ascii.eqlIgnoreCase(p.query, query)) {
+            const owned = try a.dupe(u8, path);
+            a.free(p.path);
+            _ = ix.picks.orderedRemove(i);
+            ix.picks.appendAssumeCapacity(.{ .query = p.query, .path = owned });
             return;
         };
-        try ix.picks.append(ix.gpa, .{ .query = try std.ascii.allocLowerString(a, query), .path = try a.dupe(u8, path) });
+        const owned_query = try std.ascii.allocLowerString(a, query);
+        errdefer a.free(owned_query);
+        const owned_path = try a.dupe(u8, path);
+        errdefer a.free(owned_path);
+        try ix.picks.ensureUnusedCapacity(a, 1);
+        if (ix.picks.items.len == max_picks) {
+            const old = ix.picks.orderedRemove(0);
+            a.free(old.query);
+            a.free(old.path);
+        }
+        ix.picks.appendAssumeCapacity(.{ .query = owned_query, .path = owned_path });
     }
 
     /// What the picks add to app `i` for `query`: most when it is the very
@@ -273,6 +295,17 @@ pub const Index = struct {
     pub fn save(ix: *Index, kv: nanoui.kv.Store) void {
         var aw: std.Io.Writer.Allocating = .init(ix.gpa);
         defer aw.deinit();
+        // Keep counts for unplugged volumes and temporarily missing apps.
+        const previous = kv.get(ix.gpa, store_key) catch return;
+        if (previous) |saved| {
+            defer ix.gpa.free(saved);
+            var lines = std.mem.splitScalar(u8, saved, '\n');
+            while (lines.next()) |line| {
+                const tab = std.mem.indexOfScalar(u8, line, '\t') orelse continue;
+                if (resolveLaunchKey(ix, line[0..tab]) == null)
+                    aw.writer.print("{s}\n", .{line}) catch return;
+            }
+        }
         for (ix.apps.items, ix.launches.items) |a, l| if (l > 0) aw.writer.print("{s}\t{d}\n", .{ a.path, l }) catch return;
         kv.set(store_key, aw.written()) catch {};
     }
@@ -300,15 +333,24 @@ pub const Index = struct {
 
     /// The app's icon as PNG, made the first time it is asked for.
     pub fn icon(ix: *Index, i: u32) ?[]const u8 {
-        if (ix.icons.get(i)) |cached| return if (cached) |c| c.png else null;
         const path = ix.apps.items[i].path;
+        if (ix.icons.get(path)) |cached| return if (cached) |c| c.png else null;
         const png = if (std.mem.startsWith(u8, path, "raycast")) @import("raycast.zig").icon(ix.gpa, path) else switch (builtin.os.tag) {
             .macos => iconPng(ix.gpa, path),
             .windows => @import("apps_win.zig").icon(ix.gpa, path),
             else => @import("apps_linux.zig").icon(ix.gpa, std.Io.Threaded.global_single_threaded.io(), path),
         };
-        ix.icons.put(ix.gpa, i, if (png) |p| .{ .png = p } else null) catch {};
+        ix.icons.put(ix.gpa, path, if (png) |p| .{ .png = p } else null) catch {
+            if (png) |p| ix.gpa.free(p);
+            return null;
+        };
         return png;
+    }
+
+    /// Caller owns the copy across index refreshes; free it with `gpa`.
+    pub fn copyIcon(ix: *Index, gpa: std.mem.Allocator, i: u32) ?[]u8 {
+        const png = ix.icon(i) orelse return null;
+        return gpa.dupe(u8, png) catch null;
     }
 };
 
@@ -316,6 +358,7 @@ const store_key = "nanolight.launches";
 const picks_key = "samsearch.picks";
 /// Longer queries name the app well enough on their own.
 const max_pick = 32;
+pub const max_picks = 200;
 
 pub const Pick = struct { query: []const u8, path: []const u8 };
 

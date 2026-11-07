@@ -6,23 +6,46 @@ const std = @import("std");
 const builtin = @import("builtin");
 const nanoui = @import("nanoui");
 
+pub const State = enum { off, enabled, requires_approval, unavailable };
+
+pub fn state() State {
+    if (builtin.os.tag == .macos) return Mac.state();
+    const on = if (builtin.os.tag == .windows) Windows.login(null) else Linux.login(null);
+    return if (on) .enabled else .off;
+}
+
+pub fn openSettings() void {
+    if (builtin.os.tag == .macos) _ = nanoui.shell.openUrl("x-apple.systempreferences:com.apple.LoginItems-Settings.extension");
+}
+
 pub fn login(set: ?bool) bool {
-    return switch (builtin.os.tag) {
-        .macos => Mac.login(set),
-        .windows => Windows.login(set),
-        else => Linux.login(set),
-    };
+    if (builtin.os.tag == .macos) {
+        Mac.set(set);
+        const current = state();
+        return current == .enabled or current == .requires_approval;
+    }
+    return if (builtin.os.tag == .windows) Windows.login(set) else Linux.login(set);
 }
 
 const Mac = struct {
     const objc = nanoui.objc;
     extern "c" fn objc_getClass(name: [*:0]const u8) ?objc.Class;
 
-    fn login(set: ?bool) bool {
-        const cls = objc_getClass("SMAppService") orelse return false;
+    fn set(value: ?bool) void {
+        const cls = objc_getClass("SMAppService") orelse return;
         const svc = objc.msg(objc.Object, cls, "mainAppService", .{});
-        if (set) |on| _ = objc.msg(objc.BOOL, svc, if (on) "registerAndReturnError:" else "unregisterAndReturnError:", .{@as(?*anyopaque, null)});
-        return objc.msg(objc.NSInteger, svc, "status", .{}) == 1; // enabled
+        if (value) |on| _ = objc.msg(objc.BOOL, svc, if (on) "registerAndReturnError:" else "unregisterAndReturnError:", .{@as(?*anyopaque, null)});
+    }
+
+    fn state() State {
+        const cls = objc_getClass("SMAppService") orelse return .unavailable;
+        const svc = objc.msg(objc.Object, cls, "mainAppService", .{});
+        return switch (objc.msg(objc.NSInteger, svc, "status", .{})) {
+            0 => .off,
+            1 => .enabled,
+            2 => .requires_approval,
+            else => .unavailable,
+        };
     }
 };
 

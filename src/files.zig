@@ -239,9 +239,15 @@ pub fn predicate(buf: []u8, query: []const u8, tier: Tier) ?[]const u8 {
 }
 
 /// Bounded tiers share one two-second deadline and one ranked, deduplicated list.
+pub const Cancel = std.atomic.Value(bool);
+
 pub fn find(io: std.Io, query: []const u8, locations: []const u8, extra: []const u8, out: *List) bool {
+    return findCancelable(io, query, locations, extra, out, null);
+}
+
+pub fn findCancelable(io: std.Io, query: []const u8, locations: []const u8, extra: []const u8, out: *List, cancel: ?*const Cancel) bool {
     out.deinit();
-    if (!eligible(query)) return false;
+    if (!eligible(query) or cancelled(cancel)) return false;
     var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -262,10 +268,11 @@ pub fn find(io: std.Io, query: []const u8, locations: []const u8, extra: []const
     var ok = false;
     for ([_]Tier{ .exact, .prefix, .word, .subsequence }) |tier| {
         const now = std.Io.Clock.awake.now(io).toMilliseconds();
+        if (cancelled(cancel)) return false;
         if (now >= deadline) break;
         var pred_buf: [2048]u8 = undefined;
         argv.items[argv.items.len - 1] = predicate(&pred_buf, query, tier) orelse return false;
-        ok = collect(io, argv.items, query, extra, out, @min(deadline, now + 500)) or ok;
+        ok = collect(io, argv.items, query, extra, out, @min(deadline, now + 500), cancel) or ok;
     }
     return ok;
 }
@@ -317,7 +324,13 @@ test "iCloud Drive is searched, the rest of Library is not" {
     try t.expect(excluded(try std.fmt.bufPrint(&buf, "{s}/Library/Preferences/x.plist", .{h}), ""));
 }
 
-fn collect(io: std.Io, argv: []const []const u8, query: []const u8, extra: []const u8, out: *List, deadline: i64) bool {
+fn cancelled(cancel: ?*const Cancel) bool {
+    return if (cancel) |c| c.load(.acquire) else false;
+}
+
+fn collect(io: std.Io, argv: []const []const u8, query: []const u8, extra: []const u8, out: *List, deadline: i64, cancel: ?*const Cancel) bool {
+    // Spotlight is the Mac's; Windows has no poll(2) to read it with.
+    if (comptime @import("builtin").os.tag == .windows) return false;
     var child = std.process.spawn(io, .{ .argv = argv, .stdin = .ignore, .stdout = .pipe, .stderr = .ignore }) catch return false;
     defer child.kill(io);
     var read_buf: [8192]u8 = undefined;
@@ -328,6 +341,7 @@ fn collect(io: std.Io, argv: []const []const u8, query: []const u8, extra: []con
     var oversized = false;
     // A wall-clock deadline also bounds a process that keeps producing output.
     while (count < 256 and total < 256 * max_path) {
+        if (cancelled(cancel)) return false;
         const remaining = deadline - std.Io.Clock.awake.now(io).toMilliseconds();
         if (remaining <= 0) break;
         var fds = [_]std.posix.pollfd{.{ .fd = child.stdout.?.handle, .events = std.posix.POLL.IN, .revents = 0 }};
@@ -336,7 +350,8 @@ fn collect(io: std.Io, argv: []const []const u8, query: []const u8, extra: []con
         if (n < 0) return false;
         if (n == 0) {
             if (used > 0 and !oversized) candidate(io, out, query, path_buf[0..used], extra);
-            return true;
+            const term = child.wait(io) catch return false;
+            return term == .exited and term.exited == 0;
         }
         total += @intCast(n);
         for (read_buf[0..@intCast(n)]) |c| {

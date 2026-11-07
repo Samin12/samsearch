@@ -55,6 +55,7 @@
     <span class="model">Haiku 5.5</span>
   </header>
   <main id="log"></main>
+  <div id="permissions" role="status" style="font-size:11.5px;padding:0 14px"></div>
   <footer>
     <input id="inp" placeholder="Ask a follow-up…" autofocus>
     <div class="hints">
@@ -69,12 +70,39 @@
   const log = document.getElementById("log"), inp = document.getElementById("inp");
   const chip = document.getElementById("chip"), flashEl = document.getElementById("flash");
   const history = [];
-  let busy = false, lastAnswer = "";
+  let busy = false, lastAnswer = "", activeTurn = "", controller = null, moving = false;
+  let sessionTimer = null;
   // In SamSearch's panel ⌘↩ belongs to the panel, so a T3 thread from the box is ⌘T there.
   if (!B.floating) document.getElementById("t3hint").remove();
 
-  const api = (path, body) => fetch(path, { method: "POST", headers: { "X-QuickAsk": "1", "Content-Type": "application/json" }, body: JSON.stringify(body) });
-  const md = (t) => (window.marked ? marked.parse(t) : t.replace(/[&<]/g, (c) => ({ "&": "&amp;", "<": "&lt;" })[c]));
+  const headers = { "X-QuickAsk": "1", "X-QuickAsk-Token": B.token, "Content-Type": "application/json" };
+  const api = (path, body, options = {}) => fetch(path, { method: "POST", headers, body: JSON.stringify(body), signal: AbortSignal.timeout(5000), ...options });
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+  const safeURL = (href) => {
+    try { const u = new URL(href); return ["http:", "https:", "mailto:"].includes(u.protocol) ? u.href : null; }
+    catch { return null; }
+  };
+  if (window.marked) marked.use({ renderer: {
+    html({ text }) { return esc(text); },
+    image({ text }) { return esc(text); },
+    link({ href, tokens }) {
+      const text = this.parser.parseInline(tokens), url = safeURL(href);
+      return url ? `<a href="${esc(url)}" rel="noopener noreferrer">${text}</a>` : text;
+    },
+  } });
+  function md(text) {
+    if (!window.marked) return esc(text);
+    const template = document.createElement("template");
+    template.innerHTML = marked.parse(text);
+    const allowed = new Set(["P", "BR", "HR", "EM", "STRONG", "DEL", "BLOCKQUOTE", "PRE", "CODE", "UL", "OL", "LI", "H1", "H2", "H3", "H4", "H5", "H6", "TABLE", "THEAD", "TBODY", "TR", "TH", "TD", "A"]);
+    for (const el of [...template.content.querySelectorAll("*")]) {
+      if (!allowed.has(el.tagName)) { el.replaceWith(document.createTextNode(el.textContent)); continue; }
+      const href = el.tagName === "A" ? safeURL(el.getAttribute("href")) : null;
+      for (const attr of [...el.attributes]) el.removeAttribute(attr.name);
+      if (href) { el.setAttribute("href", href); el.setAttribute("rel", "noopener noreferrer"); }
+    }
+    return template.innerHTML;
+  }
   const scrollDown = () => (log.scrollTop = log.scrollHeight);
   const flash = (t) => { flashEl.textContent = t; setTimeout(() => (flashEl.textContent = ""), 1400); };
 
@@ -99,11 +127,15 @@
     busy = true;
     inp.placeholder = "Ask a follow-up…";
     const el = turn(q);
+    activeTurn = crypto.randomUUID();
+    controller = new AbortController();
+    const timeout = setTimeout(() => controller?.abort(), 125000);
     const statusEl = el.parentElement.querySelector(".status");
     const linksEl = el.parentElement.querySelector(".links");
     let text = "";
     try {
-      const res = await api("/api/ask", { sid: B.sid, q, mode, history });
+      const res = await api("/api/ask", { sid: B.sid, turn: activeTurn, q, mode }, { signal: controller.signal });
+      if (!res.ok) throw new Error((await res.json()).error || `HTTP ${res.status}`);
       const reader = res.body.getReader();
       const dec = new TextDecoder();
       let buf = "", ended = false;
@@ -138,6 +170,8 @@
           } else if (m.handoff) {
             note(el, "This is real work, so it went to T3 Code.<br>Started a thread: <b></b> ✓", m.handoff);
             ended = true;
+          } else if (m.cancelled) {
+            el.className = "a note"; el.textContent = "Cancelled"; ended = true;
           } else if (m.error) {
             el.className = "a err";
             el.innerHTML = "Couldn't do that.<code></code>";
@@ -146,12 +180,16 @@
           }
         }
       }
+      if (!ended) throw new Error("The answer connection closed before it finished. Please retry.");
+      statusEl.textContent = "";
     } catch (e) {
+      statusEl.textContent = "";
       el.className = "a err";
       el.innerHTML = "Couldn't reach Quick Ask.<code></code>";
       el.querySelector("code").textContent = String(e);
     }
-    busy = false;
+    clearTimeout(timeout);
+    busy = false; controller = null; activeTurn = "";
     inp.focus();
   }
 
@@ -160,23 +198,37 @@
   function showLinks(answerEl, box) {
     const seen = new Set();
     links = [...answerEl.querySelectorAll("a[href^='http']")].map((a) => a.href).filter((u) => !seen.has(u) && seen.add(u)).slice(0, 9);
-    box.innerHTML = links.map((u, i) => `<a href="${u.replace(/"/g, "&quot;")}"><kbd>⌘${i + 1}</kbd>${u.replace(/^https?:\/\//, "").replace(/</g, "&lt;")}</a>`).join("");
+    box.innerHTML = links.map((u, i) => `<a href="${esc(u)}"><kbd>⌘${i + 1}</kbd>${esc(u.replace(/^https?:\/\//, ""))}</a>`).join("");
   }
-  const openLink = (u) => api("/api/open-url", { url: u }).then(() => flash("Opened in Chrome"));
+  const openLink = async (u) => {
+    try {
+      const response = await api("/api/open-url", { url: u });
+      if (!response.ok) throw new Error((await response.json()).error || `HTTP ${response.status}`);
+      flash(/^mailto:/i.test(u) ? "Opened mail app" : "Opened in Chrome");
+    } catch (e) { flash(e.message); }
+  };
   document.addEventListener("click", (e) => {
     const a = e.target.closest("a[href]");
     if (!a) return;
     e.preventDefault();
-    if (/^https?:/.test(a.href)) openLink(a.href);
+    if (safeURL(a.href)) openLink(a.href);
   });
 
   async function continueInT3() {
+    if (busy) return flash("Wait for the current answer");
     const last = history[history.length - 1];
     if (!last) return flash("Nothing to continue yet");
     const el = turn("Continue in T3 Code");
     note(el, "Starting a thread: <b></b>", last.q);
-    const r = await (await api("/api/t3", { sid: B.sid, q: "Continue this for me: " + last.q, title: last.q, history })).json();
-    if (r.error) { el.className = "a err"; el.textContent = r.error; } else el.innerHTML += "<br>Started ✓";
+    busy = true; controller = new AbortController();
+    const timeout = setTimeout(() => controller?.abort(), 35000);
+    try {
+      const response = await api("/api/t3", { sid: B.sid, q: "Continue this for me: " + last.q, title: last.q }, { signal: controller.signal });
+      const r = await response.json();
+      if (!response.ok || r.error || r.cancelled) throw new Error(r.error || (r.cancelled ? "Cancelled" : `HTTP ${response.status}`));
+      el.appendChild(document.createTextNode(" — Started ✓"));
+    } catch (e) { el.className = "a err"; el.textContent = String(e); }
+    finally { clearTimeout(timeout); controller = null; busy = false; }
   }
 
   document.addEventListener("keydown", (e) => {
@@ -188,6 +240,7 @@
       e.preventDefault();
       const text = inp.value.trim();
       if (!text) return;
+      if (busy) { flash("Your question is kept here until the answer finishes"); return; }
       inp.value = "";
       ask(text, e.metaKey ? "t3" : e.altKey ? "answer" : "auto");
     } else if (e.metaKey && !e.shiftKey && !e.altKey && /^[1-9]$/.test(e.key) && links[+e.key - 1]) {
@@ -205,8 +258,67 @@
     }
   });
 
-  if (B.q) ask(B.q, "auto");
+  // Native SamSearch should evaluate this function for Open Answer Window, then hide its page.
+  window.openAnswerWindow = async () => {
+    moving = true;
+    try {
+      const response = await api("/api/float", { sid: B.sid }, { signal: AbortSignal.timeout(5000) });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Couldn't move the conversation");
+      return result;
+    } catch (e) { moving = false; flash(e.message); throw e; }
+  };
+
+  function restore(turns) {
+    log.replaceChildren(); history.length = 0; busy = false; activeTurn = "";
+    for (const item of turns) {
+      const el = turn(item.q);
+      if (item.a) { el.className = "a"; el.innerHTML = md(item.a); }
+      if (item.state === "done") {
+        history.push({ q: item.q, a: item.a }); lastAnswer = item.a;
+        showLinks(el, el.parentElement.querySelector(".links"));
+      } else if (["cancelled", "error", "handoff"].includes(item.state)) {
+        el.className = item.state === "error" ? "a err" : "a note";
+        if (item.state === "error") el.textContent = item.detail || "Couldn't finish the answer";
+        else if (item.state === "handoff") el.textContent = `Started in T3 Code: ${item.detail}`;
+        else if (!item.a) el.textContent = "Cancelled";
+      } else { busy = true; activeTurn = item.id; }
+    }
+    scrollDown();
+  }
+  async function pollSession() {
+    try {
+      const response = await fetch(`/api/session?sid=${encodeURIComponent(B.sid)}`, { headers, signal: AbortSignal.timeout(5000) });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      restore((await response.json()).turns || []);
+      if (busy) sessionTimer = setTimeout(pollSession, 400);
+    } catch (e) {
+      chip.textContent = `Couldn't resume the answer: ${e.message}. Retrying…`;
+      const answer = log.lastElementChild?.querySelector(".a");
+      if (answer && !answer.textContent.trim().replace("Thinking…", "")) { answer.className = "a err"; answer.textContent = "Connection interrupted. Retrying…"; }
+      sessionTimer = setTimeout(pollSession, 2000);
+    }
+  }
+  window.addEventListener("pagehide", () => {
+    clearTimeout(sessionTimer);
+    if (moving) return;
+    api("/api/cancel", { sid: B.sid, turn: activeTurn || null, disconnected: !B.floating }, { keepalive: true }).catch(() => {});
+    controller?.abort();
+  });
+  if (B.sid) {
+    const url = new URL(location.href); url.searchParams.set("sid", B.sid);
+    window.history.replaceState(null, "", url);
+  }
+  if (B.turns?.length) { restore(B.turns); chip.textContent = busy ? "Answering…" : "Conversation restored"; if (busy) pollSession(); }
+  else if (B.q) ask(B.q, "auto");
   else { inp.placeholder = "Ask anything…"; chip.textContent = "Ready"; }
+  fetch("/api/status", { headers, signal: AbortSignal.timeout(3000) }).then((r) => r.json()).then((status) => {
+    const denied = [];
+    if (status.screenRecording === "denied") denied.push("Quick Ask needs Screen Recording in System Settings › Privacy & Security");
+    if (status.fullDiskAccess === "denied") denied.push("Quick Ask needs Full Disk Access for Messages");
+    for (const [name, state] of Object.entries(status.automation || {})) if (state === "denied") denied.push(`Quick Ask Automation denied for ${name}`);
+    document.getElementById("permissions").textContent = denied.join(" · ");
+  }).catch(() => {});
   inp.focus();
 </script>
 </body>

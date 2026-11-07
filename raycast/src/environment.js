@@ -9,6 +9,7 @@ const state = {
   commandName: "",
   assetsPath: "",
   supportPath: "",
+  storageDir: "",
   appearance: "dark",
   launchType: "userInitiated",
   packageJson: null,
@@ -47,10 +48,18 @@ function init(extensionDir, commandName) {
   state.extensionName = pkg.name || path.basename(extensionDir);
   state.commandName = commandName;
   state.assetsPath = path.join(extensionDir, "assets");
-  state.supportPath = path.join(extensionDir, "support");
+  // Mutable data is a sibling of installed bundles and survives replacement.
+  state.storageDir = path.join(path.dirname(extensionDir), ".data", path.basename(extensionDir));
+  fs.mkdirSync(state.storageDir, { recursive: true });
+  for (const name of ["local-storage.json", "preferences.json", "support"]) {
+    const old = path.join(extensionDir, name);
+    const dest = path.join(state.storageDir, name);
+    if (fs.existsSync(old) && !fs.existsSync(dest)) fs.cpSync(old, dest, { recursive: true });
+  }
+  state.supportPath = path.join(state.storageDir, "support");
   state.packageJson = pkg;
   state.command = command;
-  state.preferences = loadPreferences(pkg, command, extensionDir);
+  state.preferences = loadPreferences(pkg, command, state.storageDir);
   fs.mkdirSync(state.supportPath, { recursive: true });
   return { pkg, command };
 }
