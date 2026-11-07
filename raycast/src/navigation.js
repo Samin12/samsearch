@@ -10,7 +10,7 @@ function setNavigator(fn) {
 }
 
 function push(element, _options) {
-  stack.push(element);
+  stack.push({ element });
   notify();
 }
 
@@ -23,11 +23,15 @@ function pop() {
 
 function reset(root) {
   stack.length = 0;
-  if (root) stack.push(root);
+  if (root) stack.push({ element: root });
 }
 
 function top() {
-  return stack.length ? stack[stack.length - 1] : null;
+  return stack.length ? stack[stack.length - 1].element : null;
+}
+
+function topEntry() {
+  return stack[stack.length - 1] || null;
 }
 
 function depth() {
@@ -48,4 +52,4 @@ function useNavigation() {
   };
 }
 
-module.exports = { setNavigator, push, pop, reset, top, depth, useNavigation, stack };
+module.exports = { setNavigator, push, pop, reset, top, topEntry, depth, useNavigation, stack };

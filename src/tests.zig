@@ -29,6 +29,8 @@ test {
     _ = @import("tests_prefs.zig");
     _ = @import("tests_files.zig");
     _ = @import("tests_digup.zig");
+    _ = @import("tests_panel.zig");
+    _ = @import("tests_account.zig");
     switch (@import("builtin").os.tag) {
         .macos => {
             _ = @import("single_mac.zig");
@@ -348,13 +350,22 @@ test "the welcome: a key, pressed for real, then a first search" {
     try std.testing.expect(steps.done and !o.active);
     try std.testing.expect(t.hasText("3,072"));
 
-    // Esc skips from the first step, keeping the key shown there.
+    // Esc skips from the first step and keeps the current key, even after
+    // the arrows moved to another one (B19).
     steps = .{};
     o.start(.ctrl_space);
     t.settle(1);
     _ = t.shortcut(.{ .key = ui.Shortcut.escape });
     try std.testing.expect(steps.done and !o.active);
-    try std.testing.expectEqual(shortcut.Choice.ctrl_space, steps.applied.?);
+    try std.testing.expectEqual(@as(?shortcut.Choice, null), steps.applied);
+    steps = .{};
+    o.start(.ctrl_space);
+    t.settle(1);
+    t.key(.right);
+    t.settle(1);
+    _ = t.shortcut(.{ .key = ui.Shortcut.escape });
+    try std.testing.expect(steps.done and !o.active);
+    try std.testing.expectEqual(@as(?shortcut.Choice, null), steps.applied);
 }
 
 const SettingsHost = @import("settings_host.zig").SettingsHost;
@@ -628,4 +639,135 @@ test "2FA codes open in the panel by Return or their number, in either theme" {
         try std.testing.expectEqual(results.Kind.new_thread, s.res.rows[s.res.rowFor(2).?].kind);
         try std.testing.expectEqual(results.Kind.digup, s.res.rows[s.res.rowFor(3).?].kind);
     }
+}
+
+test "Google cache expires exact answers and shorter stand-ins" {
+    var cache: suggest.Cache = .{};
+    var said: suggest.List = .{};
+    said.push("liquid glass");
+    var out: suggest.List = .{};
+    cache.putAt("liquid gl", &said, 100);
+    try std.testing.expect(cache.lookupAt("liquid gl", &out, 101));
+    try std.testing.expect(!cache.lookupAt("liquid gla", &out, 101));
+    try std.testing.expectEqual(@as(usize, 1), out.n);
+    try std.testing.expect(!cache.lookupAt("liquid gl", &out, 100 + suggest.Cache.ttl_ms));
+    try std.testing.expectEqual(@as(usize, 0), out.n);
+    try std.testing.expect(!cache.lookupAt("liquid gla", &out, 100 + suggest.Cache.ttl_ms));
+    try std.testing.expectEqual(@as(usize, 0), out.n);
+}
+
+test "Google drops old generations and disabled answers without poisoning the cache" {
+    const t = std.testing;
+    var ix: Index = .init(t.allocator);
+    defer ix.deinit();
+    var s: view.Nanolight = .{ .index = &ix };
+    defer s.query.deinit();
+    s.query.set("liquid gl");
+    s.rebuild();
+    const old = s.pipeline.generation;
+    s.query.set("other words");
+    s.rebuild();
+    s.query.set("liquid gl");
+    s.rebuild();
+    var said: suggest.List = .{};
+    said.push("liquid glass");
+    s.googleAnswered(old, &said);
+    try t.expectEqual(@as(usize, 0), s.web.n);
+    var out: suggest.List = .{};
+    try t.expect(!s.cache.lookup("liquid gl", &out));
+    s.googleAnswered(s.pipeline.generation, &said);
+    try t.expectEqual(@as(usize, 1), s.web.n);
+    // A failed longer request must never cache the shorter stand-in.
+    s.query.set("liquid gla");
+    s.rebuild();
+    try t.expectEqual(@as(usize, 1), s.web.n);
+    s.googleAnswered(s.pipeline.generation, null);
+    try t.expectEqual(@as(usize, 0), s.web.n);
+    try t.expectEqual(@import("search.zig").Status.failed, s.pipeline.status(.google));
+    try t.expect(!s.cache.lookup("liquid gla", &out));
+    const current = s.pipeline.generation;
+    s.suggest_on = false;
+    s.googleAnswered(current, &said);
+    try t.expectEqual(@as(usize, 0), s.web.n);
+    try t.expect(!s.cache.lookup("liquid gla", &out));
+}
+
+test "app sorting keeps launches and path-keyed icons together; copied icons own their bytes" {
+    const t = std.testing;
+    var ix: Index = .init(t.allocator);
+    defer ix.deinit();
+    try ix.add("Zebra", "/Applications/Zebra.app");
+    try ix.add("Alpha", "/Applications/Alpha.app");
+    ix.opened(0, null);
+    ix.opened(0, null);
+    ix.opened(1, null);
+    try ix.icons.put(t.allocator, ix.apps.items[0].path, .{ .png = try t.allocator.dupe(u8, "zebra icon") });
+    ix.sort();
+    try t.expectEqualStrings("Alpha", ix.names.items[0]);
+    try t.expectEqual(@as(u16, 1), ix.launches.items[0]);
+    try t.expectEqual(@as(u16, 2), ix.launches.items[1]);
+    const owned = ix.copyIcon(t.allocator, 1).?;
+    defer t.allocator.free(owned);
+    try t.expectEqualStrings("zebra icon", owned);
+    try t.expect(owned.ptr != ix.icon(1).?.ptr);
+    ix.deinit();
+    ix = .init(t.allocator);
+    try t.expectEqualStrings("zebra icon", owned);
+}
+
+test "saving launch counts retains apps absent from this index" {
+    const t = std.testing;
+    var mem: nanoui.kv.Memory = .{ .gpa = t.allocator };
+    defer mem.deinit();
+    try mem.store().set("nanolight.launches", "/Volumes/Offline/Gone.app\t7\n/Applications/Alpha.app\t2\n");
+    var ix: Index = .init(t.allocator);
+    defer ix.deinit();
+    try ix.add("Alpha", "/Applications/Alpha.app");
+    ix.load(mem.store());
+    ix.opened(0, mem.store());
+    var restored: Index = .init(t.allocator);
+    defer restored.deinit();
+    try restored.add("Gone", "/Volumes/Offline/Gone.app");
+    try restored.add("Alpha", "/Applications/Alpha.app");
+    restored.load(mem.store());
+    try t.expectEqual(@as(u16, 7), restored.launches.items[0]);
+    try t.expectEqual(@as(u16, 3), restored.launches.items[1]);
+}
+
+test "learned app picks stay capped and retain recently used queries" {
+    const t = std.testing;
+    const apps = @import("apps.zig");
+    var ix: Index = .init(t.allocator);
+    defer ix.deinit();
+    try ix.add("Alpha", "/Applications/Alpha.app");
+    for (0..apps.max_picks) |i| {
+        var buf: [32]u8 = undefined;
+        ix.picked(try std.fmt.bufPrint(&buf, "query {d}", .{i}), 0, null);
+    }
+    ix.picked("query 0", 0, null);
+    ix.picked("new query", 0, null);
+    try t.expectEqual(apps.max_picks, ix.picks.items.len);
+    try t.expectEqual(@as(i32, 600), ix.pickBoost("query 0", 0));
+    try t.expectEqual(@as(i32, 400), ix.pickBoost("query 1", 0));
+    try t.expectEqualStrings("query 2", ix.picks.items[0].query);
+}
+
+test "the calculator Copied chip follows the expression that was copied" {
+    const t = std.testing;
+    var ix: Index = .init(t.allocator);
+    defer ix.deinit();
+    var s: view.Nanolight = .{ .index = &ix };
+    defer s.query.deinit();
+    s.reveal();
+    var tester: ui.Tester = undefined;
+    try tester.init(t.allocator, .init(&s, view.Nanolight.view), .{ .width = view.width, .height = view.max_height, .dark = true });
+    defer tester.deinit();
+    tester.settle(1);
+    press(&tester, &.{.{ .insert = "2+2" }});
+    press(&tester, &.{.{ .command = .insert_newline }});
+    try t.expect(tester.hasText("Copied"));
+    press(&tester, &.{ .{ .command = .select_all }, .{ .insert = "3+3" } });
+    try t.expect(!tester.hasText("Copied"));
+    press(&tester, &.{ .{ .command = .select_all }, .{ .insert = "2+2" } });
+    try t.expect(!tester.hasText("Copied"));
 }

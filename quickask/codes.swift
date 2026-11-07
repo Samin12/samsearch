@@ -82,24 +82,12 @@ struct CodeSource {
 
 /// The CLI runs from a GUI app, with its own PATH and a bounded wait.
 func codeMailCommand(_ alias: String) -> (out: Data, error: String?) {
-    let p = Process(), out = Pipe(), err = Pipe()
-    p.executableURL = URL(fileURLWithPath: home + "/.local/bin/composio")
     let query = #"newer_than:1d -category:promotions -category:social (code OR verification OR verify OR OTP OR passcode OR 2FA OR "one-time" OR "sign in" OR "log in" OR login OR security)"#
-    p.arguments = ["execute", "GMAIL_FETCH_EMAILS", "--account", alias, "-d", String(decoding: jsonData(["query": query, "max_results": 10, "include_payload": false, "verbose": false]), as: UTF8.self)]
+    let args = ["execute", "GMAIL_FETCH_EMAILS", "--account", alias, "-d", String(decoding: jsonData(["query": query, "max_results": 10, "include_payload": false, "verbose": false]), as: UTF8.self)]
     var env = ProcessInfo.processInfo.environment
     env["PATH"] = home + "/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-    p.environment = env
-    p.standardInput = FileHandle.nullDevice; p.standardOutput = out; p.standardError = err
-    do { try p.run() } catch { return (Data(), error.localizedDescription) }
-    let timeout = DispatchWorkItem { if p.isRunning { p.terminate() } }
-    DispatchQueue.global().asyncAfter(deadline: .now() + 6, execute: timeout)
-    let group = DispatchGroup()
-    group.enter()
-    // Drain stderr too: neither pipe should hold up the other.
-    DispatchQueue.global().async { _ = err.fileHandleForReading.readDataToEndOfFile(); group.leave() }
-    let data = out.fileHandleForReading.readDataToEndOfFile()
-    p.waitUntilExit(); timeout.cancel(); group.wait()
-    return (data, p.terminationStatus == 0 ? nil : "Composio exited with \(p.terminationStatus) (or timed out). Check the \(alias) Gmail connection.")
+    let result = run(home + "/.local/bin/composio", args, environment: env, timeout: 6)
+    return (Data(result.out.utf8), result.code == 0 ? nil : "Composio failed or timed out. Check the \(alias) Gmail connection.")
 }
 
 func mailCodes(_ alias: String, email: String, since: Date) -> CodeSource {
@@ -157,8 +145,8 @@ func messageCodes(since: Date, path: String = home + "/Library/Messages/chat.db"
     defer { if let db { sqlite3_close(db) } }
     func failed() -> CodeSource {
         let reason = db.map { String(cString: sqlite3_errmsg($0)) } ?? "Couldn't open chat.db"
-        if reason.lowercased().contains("authorization") || reason.lowercased().contains("permission") || status == SQLITE_AUTH || status == SQLITE_PERM {
-            result.error = "Messages needs Full Disk Access for SamSearch — System Settings › Privacy & Security › Full Disk Access (\(reason))"
+        if reason.lowercased().contains("authorization") || reason.lowercased().contains("permission") || reason.lowercased().contains("unable to open database file") || status == SQLITE_AUTH || status == SQLITE_PERM || status == SQLITE_CANTOPEN {
+            result.error = "Messages needs Full Disk Access for Quick Ask — System Settings › Privacy & Security › Full Disk Access (\(reason))"
         } else {
             result.error = "Couldn't read Messages: \(reason)"
         }
@@ -166,6 +154,13 @@ func messageCodes(since: Date, path: String = home + "/Library/Messages/chat.db"
     }
     guard status == SQLITE_OK, let db else { return failed() }
     sqlite3_busy_timeout(db, 300)
+    let deadline = UnsafeMutablePointer<TimeInterval>.allocate(capacity: 1)
+    deadline.initialize(to: Date().timeIntervalSince1970 + 4)
+    defer { sqlite3_progress_handler(db, 0, nil, nil); deadline.deinitialize(count: 1); deadline.deallocate() }
+    sqlite3_progress_handler(db, 500, { context in
+        guard let context else { return 0 }
+        return Date().timeIntervalSince1970 > context.assumingMemoryBound(to: TimeInterval.self).pointee ? 1 : 0
+    }, deadline)
     let sql = """
     SELECT message.ROWID, message.text, message.attributedBody, message.date, handle.id
     FROM message LEFT JOIN handle ON message.handle_id = handle.ROWID
@@ -199,16 +194,23 @@ final class Codes {
     private let queue = DispatchQueue(label: "codes")
     private var cached: [Int: (Date, [String: Any])] = [:]
     private var waiting: [Int: [([String: Any]) -> Void]] = [:]
+    private let sourceFetchers: ((Date) -> [() -> CodeSource])?
+    private let fetchTimeout: TimeInterval
+    private let cacheLifetime: TimeInterval
+
+    init(sourceFetchers: ((Date) -> [() -> CodeSource])? = nil, fetchTimeout: TimeInterval = 8, cacheLifetime: TimeInterval = 4) {
+        self.sourceFetchers = sourceFetchers; self.fetchTimeout = fetchTimeout; self.cacheLifetime = cacheLifetime
+    }
 
     func search(_ minutes: Int, done: @escaping ([String: Any]) -> Void) {
         queue.async {
-            if let (at, reply) = self.cached[minutes], Date().timeIntervalSince(at) < 4 { done(reply); return }
+            if let (at, reply) = self.cached[minutes], Date().timeIntervalSince(at) < self.cacheLifetime { done(reply); return }
             if self.waiting[minutes] != nil { self.waiting[minutes]!.append(done); return }
             self.waiting[minutes] = [done]
             let since = Date().addingTimeInterval(-Double(minutes * 60)), group = DispatchGroup()
             let lock = NSLock()
             var results = [CodeSource]()
-            let sources: [() -> CodeSource] = [
+            let sources: [() -> CodeSource] = self.sourceFetchers?(since) ?? [
                 { mailCodes("aianswer", email: "samin@aianswer.us", since: since) },
                 { mailCodes("personal", email: "samin.yasar12@gmail.com", since: since) },
                 { messageCodes(since: since) },
@@ -221,15 +223,38 @@ final class Codes {
                     group.leave()
                 }
             }
-            group.notify(queue: self.queue) {
-                let hits = results.flatMap(\.hits).sorted { $0.time == $1.time ? $0.id < $1.id : $0.time > $1.time }
-                let reply: [String: Any] = ["codes": hits.map(\.json), "sources": results.sorted { $0.source < $1.source }.map(\.json), "minutes": minutes]
+            var finished = false // read only on the serial codes queue
+            let finish = {
+                guard !finished else { return }
+                finished = true
+                lock.lock(); var snapshot = results; lock.unlock()
+                let expected = ["Gmail · samin@aianswer.us", "Gmail · samin.yasar12@gmail.com", "Messages"]
+                for source in expected where !snapshot.contains(where: { $0.source == source }) {
+                    snapshot.append(CodeSource(source: source, error: "Request timed out. Retrying on the next refresh."))
+                }
+                let hits = snapshot.flatMap(\.hits).sorted { $0.time == $1.time ? $0.id < $1.id : $0.time > $1.time }
+                let reply: [String: Any] = ["codes": hits.map(\.json), "sources": snapshot.sorted { $0.source < $1.source }.map(\.json), "minutes": minutes]
                 self.cached[minutes] = (Date(), reply)
                 let calls = self.waiting.removeValue(forKey: minutes) ?? []
                 calls.forEach { $0(reply) }
             }
+            group.notify(queue: self.queue, execute: finish)
+            self.queue.asyncAfter(deadline: .now() + self.fetchTimeout, execute: finish)
         }
     }
+}
+
+func codesDatabaseReadable(_ path: String) -> Bool {
+    var db: OpaquePointer?
+    let status = sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, nil)
+    defer { if let db { sqlite3_close(db) } }
+    guard status == SQLITE_OK, let db else { return false }
+    sqlite3_busy_timeout(db, 100)
+    var stmt: OpaquePointer?
+    defer { if let stmt { sqlite3_finalize(stmt) } }
+    guard sqlite3_prepare_v2(db, "SELECT ROWID FROM message LIMIT 1", -1, &stmt, nil) == SQLITE_OK, let stmt else { return false }
+    let step = sqlite3_step(stmt)
+    return step == SQLITE_ROW || step == SQLITE_DONE
 }
 
 func selftestCodes() {
@@ -283,5 +308,22 @@ func selftestCodes() {
     sqlite3_close(db)
     let messages = messageCodes(since: now.addingTimeInterval(-1800), path: path)
     guard messages.error == nil, messages.hits.map(\.code) == ["839201", "2737"], messages.hits.first?.sender == "test sender" else { fatalError("Messages query, cutoff or direction") }
+    guard codesDatabaseReadable(path), !codesDatabaseReadable(path + "/missing") else { fatalError("Messages permission probe") }
+    let missing = messageCodes(since: now, path: path + "/missing")
+    guard missing.error?.contains("Quick Ask") == true else { fatalError("SQLITE_CANTOPEN permission hint") }
+    let start = Date()
+    let command = run("/bin/sh", ["-c", "trap '' TERM; sleep 2"], timeout: 0.05)
+    guard command.code == -2, Date().timeIntervalSince(start) < 1 else { fatalError("Command hard deadline") }
+    let stalled = DispatchSemaphore(value: 0), completed = DispatchSemaphore(value: 0)
+    let codes = Codes(sourceFetchers: { _ in [{ _ = stalled.wait(timeout: .now() + 1); return CodeSource(source: "Messages") }] }, fetchTimeout: 0.04, cacheLifetime: 0)
+    for _ in 0..<2 {
+        codes.search(30) { reply in
+            guard (reply["sources"] as? [[String: Any]])?.contains(where: { ($0["error"] as? String)?.contains("timed out") == true }) == true else { fatalError("Codes overall deadline") }
+            completed.signal()
+        }
+        guard completed.wait(timeout: .now() + 1) == .success else { fatalError("Codes waiting was not cleared") }
+    }
+    stalled.signal(); stalled.signal()
+    print("codes deadlines, retry after stalled source and permission probes passed")
     print("codes selftest: \(cases.count) extraction cases, HTML entities, Messages archives and SQLite cutoff/direction passed")
 }

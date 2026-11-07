@@ -13,7 +13,7 @@ const mod_control: u32 = 0x2;
 const mod_shift: u32 = 0x4;
 const mod_norepeat: u32 = 0x4000;
 const vk_space: u32 = 0x20;
-const id: i32 = 1;
+var id: i32 = 1;
 
 pub const Pressed = struct { ctx: *anyopaque, func: *const fn (ctx: *anyopaque) void };
 
@@ -35,13 +35,20 @@ pub fn modifiers(choice: Choice) u32 {
 }
 
 pub fn register(choice: Choice, on: Pressed) !void {
-    pressed = on;
     const h = msg.window() orelse return error.NoWindow;
-    msg.on_hotkey = .{ .ctx = h, .func = hot };
+    const mods = modifiers(choice);
+    if (registered and current == mods) {
+        pressed = on;
+        return;
+    }
+    const next: i32 = if (id == 1) 2 else 1;
+    if (RegisterHotKey(h, next, mods, vk_space) == 0) return error.HotKeyTaken;
     if (registered) _ = UnregisterHotKey(h, id);
-    registered = RegisterHotKey(h, id, modifiers(choice), vk_space) != 0;
-    if (!registered) return error.HotKeyTaken;
-    current = modifiers(choice);
+    id = next;
+    registered = true;
+    current = mods;
+    pressed = on;
+    msg.on_hotkey = .{ .ctx = h, .func = hot };
 }
 
 /// Whether another app holds `choice`: registered and let go again.
@@ -49,12 +56,18 @@ pub fn taken(choice: Choice) bool {
     const m = modifiers(choice);
     if (registered and m == current) return false;
     const h = msg.window() orelse return false;
-    if (RegisterHotKey(h, id + 1, m, vk_space) == 0) return true;
-    _ = UnregisterHotKey(h, id + 1);
+    if (RegisterHotKey(h, 3, m, vk_space) == 0) return true;
+    _ = UnregisterHotKey(h, 3);
     return false;
 }
 
 test "the choices' modifiers" {
     try std.testing.expectEqual(mod_alt | mod_norepeat, modifiers(.cmd_space));
     try std.testing.expectEqual(mod_control | mod_shift | mod_norepeat, modifiers(.opt_cmd_space));
+}
+
+pub fn unregister() void {
+    const h = msg.window() orelse return;
+    if (registered) _ = UnregisterHotKey(h, id);
+    registered = false;
 }

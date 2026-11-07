@@ -123,15 +123,21 @@ pub fn decode(arena: std.mem.Allocator, body: []const u8, typed: []const u8, out
 
 /// The last answers, by the words they answer.
 pub const Cache = struct {
+    pub const ttl_ms = 5 * 60 * 1000;
     const slots = 64;
     keys: [slots][max_len]u8 = undefined,
     key_lens: [slots]u8 = @splat(0),
     lists: [slots]List = undefined,
+    expires: [slots]i64 = @splat(0),
     n: usize = 0,
     /// The slot the next new answer takes (the oldest, once full).
     next: usize = 0,
 
     pub fn put(c: *Cache, typed: []const u8, l: *const List) void {
+        c.putAt(typed, l, now());
+    }
+
+    pub fn putAt(c: *Cache, typed: []const u8, l: *const List, time: i64) void {
         var buf: [max_len]u8 = undefined;
         const key = plain(&buf, typed);
         const i = c.find(key) orelse blk: {
@@ -143,6 +149,7 @@ pub const Cache = struct {
             break :blk slot;
         };
         c.lists[i] = l.*;
+        c.expires[i] = time + ttl_ms;
     }
 
     fn find(c: *const Cache, key: []const u8) ?usize {
@@ -154,18 +161,23 @@ pub const Cache = struct {
     /// (true: there is no need to ask), or its answer to fewer of the
     /// letters, kept to what still begins with them (false).
     pub fn lookup(c: *const Cache, typed: []const u8, out: *List) bool {
+        return c.lookupAt(typed, out, now());
+    }
+
+    pub fn lookupAt(c: *const Cache, typed: []const u8, out: *List, time: i64) bool {
         out.n = 0;
         var buf: [max_len]u8 = undefined;
         const key = plain(&buf, typed);
         if (key.len == 0) return false;
-        if (c.find(key)) |i| {
+        if (c.find(key)) |i| if (time < c.expires[i]) {
             out.* = c.lists[i];
             return true;
-        }
+        };
         var len = key.len;
         while (len > 1) {
             len -= 1;
             const i = c.find(key[0..len]) orelse continue;
+            if (time >= c.expires[i]) continue;
             const said = &c.lists[i];
             for (0..said.n) |k| {
                 var cb: [max_len]u8 = undefined;
@@ -177,6 +189,10 @@ pub const Cache = struct {
         return false;
     }
 };
+
+fn now() i64 {
+    return std.Io.Clock.awake.now(std.Io.Threaded.global_single_threaded.io()).toMilliseconds();
+}
 
 test "addresses, emails and paths never go out" {
     const t = std.testing;

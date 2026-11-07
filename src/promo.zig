@@ -229,7 +229,7 @@ pub fn main(init: std.process.Init) !void {
     ix.sort();
     const hn_icon = readAll(io, gpa, hn_icon_path);
     if (hn_icon) |png| if (ix.find("Hacker News")) |i| {
-        ix.icons.put(gpa, i, .{ .png = try gpa.dupe(u8, png) }) catch {};
+        ix.icons.put(gpa, ix.apps.items[i].path, .{ .png = try gpa.dupe(u8, png) }) catch {};
     };
     defer if (hn_icon) |b| gpa.free(b);
 

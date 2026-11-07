@@ -196,3 +196,90 @@ test "DigUp's setting is on by default, persists, and fits with the footer" {
     try tester.clickText("Search DigUp as you type");
     try t.expect(s.digup_on);
 }
+
+test "DigUp refills never cache Google stand-ins and cleared hits force a refill" {
+    const t = std.testing;
+    const suggest = @import("suggest.zig");
+    var ix: Index = .init(t.allocator);
+    defer ix.deinit();
+    var s: view.Nanolight = .{ .index = &ix };
+    defer s.query.deinit();
+    defer s.dug.deinit();
+    var web: suggest.List = .{};
+    web.push("invoice example");
+    s.cache.put("invo", &web);
+    s.query.set("invoice");
+    s.rebuild();
+    try t.expectEqual(@as(usize, 1), s.web.n);
+    const generation = s.pipeline.generation;
+    const google_key = s.res.rows[s.res.rowFor(4).?].key;
+    var answer: digup.List = .{ .found = .{ .allocator = t.allocator } };
+    defer answer.deinit();
+    try hits(&answer);
+    s.digupAnsweredGeneration(generation, &answer);
+    try t.expect(google_key.eql(s.res.rows[s.res.rowFor(4).?].key));
+    var out: suggest.List = .{};
+    try t.expect(!s.cache.lookup("invoice", &out));
+    try t.expectEqual(@as(usize, 1), out.n);
+    const hit_key = s.res.rows[0].key;
+    s.dug.deinit();
+    try t.expect(s.rowByKey(hit_key) == null);
+    s.rebuild();
+    try t.expectEqual(generation, s.pipeline.generation);
+    for (s.res.slice()) |r| try t.expect(r.kind != .digup_hit);
+}
+
+test "DigUp rejects old generations, reports failure and retries a timeout once" {
+    const t = std.testing;
+    var ix: Index = .init(t.allocator);
+    defer ix.deinit();
+    var s: view.Nanolight = .{ .index = &ix };
+    defer s.query.deinit();
+    defer s.dug.deinit();
+    s.query.set("invoice");
+    s.rebuild();
+    const old = s.pipeline.generation;
+    s.query.set("report");
+    s.rebuild();
+    s.query.set("invoice");
+    s.rebuild();
+    var answer: digup.List = .{ .found = .{ .allocator = t.allocator } };
+    defer answer.deinit();
+    try hits(&answer);
+    s.digupAnsweredGeneration(old, &answer);
+    try t.expectEqual(@as(usize, 0), s.dug.found.n);
+    try t.expectEqual(@as(usize, 3), answer.found.n);
+    s.digupAnsweredGeneration(s.pipeline.generation, &answer);
+    s.digupAnsweredGeneration(s.pipeline.generation, null);
+    try t.expectEqual(@as(usize, 0), s.dug.found.n);
+    try t.expectEqual(@import("search.zig").Status.failed, s.pipeline.status(.digup));
+    try t.expect(digup.retry(true, 0));
+    try t.expect(!digup.retry(true, 1));
+    try t.expect(!digup.retry(false, 0));
+}
+
+test "DigUp selection and shortcuts follow paths when the ranking changes" {
+    const t = std.testing;
+    var ix: Index = .init(t.allocator);
+    defer ix.deinit();
+    var s: view.Nanolight = .{ .index = &ix };
+    defer s.query.deinit();
+    defer s.dug.deinit();
+    s.query.set("invoice");
+    s.rebuild();
+    var answer: digup.List = .{ .found = .{ .allocator = t.allocator } };
+    defer answer.deinit();
+    try hits(&answer);
+    s.digupAnsweredGeneration(s.pipeline.generation, &answer);
+    s.sel = 1;
+    const selected = s.selectedKey().?;
+    const number = s.res.number(s.sel);
+    try t.expect(digup.decode(t.allocator,
+        \\{"hits":[{"path":"/tmp/notes.md"},{"path":"/tmp/report.pdf"}],"strong":2}
+    , &answer));
+    s.digupAnsweredGeneration(s.pipeline.generation, &answer);
+    try t.expect(selected.eql(s.selectedKey().?));
+    try t.expectEqual(@as(usize, 0), s.sel);
+    try t.expectEqual(number, s.res.number(s.sel));
+    try t.expectEqualStrings("/tmp/notes.md", s.filePath(s.rowByKey(selected).?).?);
+}

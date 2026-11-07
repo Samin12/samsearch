@@ -82,8 +82,9 @@ pub fn set(service: []const u8, account: []const u8, secret: []const u8) bool {
     return SecItemAdd(@ptrCast(add), null) == 0;
 }
 
-pub fn remove(service: []const u8, account: []const u8) void {
+pub fn remove(service: []const u8, account: []const u8) bool {
     const pool = objc.Pool.push();
     defer pool.pop();
-    _ = SecItemDelete(@ptrCast(query(service, account, &.{}, &.{})));
+    const status = SecItemDelete(@ptrCast(query(service, account, &.{}, &.{})));
+    return status == 0 or status == err_not_found;
 }

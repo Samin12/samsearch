@@ -43,6 +43,7 @@ pub const Recorder = struct {
     fn seen(r: *Recorder, ev: objc.Object) ?objc.Object {
         const code = objc.msg(u16, ev, "keyCode", .{});
         const flags: u64 = objc.msg(objc.NSUInteger, ev, "modifierFlags", .{});
+        if (code == 12 and flags & (1 << 20) != 0) return ev;
         // What the key types without modifiers: "x" for ⌥X, not "≈".
         const plain = objc.msg(?objc.Object, ev, "charactersByApplyingModifiers:", .{@as(objc.NSUInteger, 0)});
         const s = objc.fromNSString(plain);

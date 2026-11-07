@@ -10,6 +10,8 @@ const nanoui = @import("nanoui");
 const sc = @import("script_commands.zig");
 const model = @import("raycast_model.zig");
 const Ext = @import("raycast_view.zig").Ext;
+const ProcessJob = @import("raycast.zig").ProcessJob;
+const Lifecycle = @import("raycast.zig").Lifecycle;
 const windows = builtin.os.tag == .windows;
 
 pub const Hooks = struct {
@@ -41,6 +43,8 @@ pub const Runner = struct {
     meta: sc.Meta = .{},
     title: []const u8 = "",
     args: [3]std.ArrayList(u8) = .{ .empty, .empty, .empty },
+    state: Lifecycle = .stopped,
+    reaping: ?*ProcessJob = null,
     child: ?std.process.Child = null,
     watch: ?nanoui.fdwatch.Watch = null,
     out: std.ArrayList(u8) = .empty,
@@ -72,6 +76,7 @@ pub const Runner = struct {
         r.meta = sc.parse(a, r.bytes) orelse .{ .title = r.title };
         for (&r.args) |*x| x.clearRetainingCapacity();
         r.ext.start(r.title, icon, .{ .ctx = r, .func = said });
+        r.ext.tick = .{ .ctx = r, .func = tick };
         r.shown = true;
         if (r.meta.argCount() > 0 or r.meta.confirm) return r.ask();
         r.run();
@@ -111,7 +116,10 @@ pub const Runner = struct {
     fn run(r: *Runner) void {
         r.stop();
         r.out.clearRetainingCapacity();
-        const a = r.arena.?.allocator();
+        var scratch: std.heap.ArenaAllocator = .init(r.gpa);
+        defer scratch.deinit();
+        const a = scratch.allocator();
+        r.state = .spawning;
         var cmd_buf: [8][]const u8 = undefined;
         const cmd = sc.command(r.bytes, r.file, &cmd_buf);
         var argv: std.ArrayList([]const u8) = .empty;
@@ -129,6 +137,7 @@ pub const Runner = struct {
         const child = std.process.spawn(r.io, .{ .argv = argv.items, .cwd = .{ .path = dir }, .stdin = .ignore, .stdout = .pipe, .stderr = if (windows) .ignore else .inherit, .create_no_window = windows }) catch
             return r.fail("The script couldn't be started (is its interpreter installed?).");
         r.child = child;
+        r.state = .running;
         const out = child.stdout.?;
         r.watch = if (windows)
             nanoui.fdwatch.reader(out.handle, r, bytesIn, ended) catch null
@@ -153,6 +162,7 @@ pub const Runner = struct {
     }
 
     fn fail(r: *Runner, why: []const u8) void {
+        r.state = .stopped;
         // Said in the panel (and the footer), not left at "Starting…".
         if (r.ext.view == null) {
             var arena: std.heap.ArenaAllocator = .init(r.gpa);
@@ -181,7 +191,7 @@ pub const Runner = struct {
         r.hooks.redraw(r.hooks.ctx);
     }
 
-    fn said(ctx: *anyopaque, line: []const u8) void {
+    pub fn said(ctx: *anyopaque, line: []const u8) void {
         const r: *Runner = @ptrCast(@alignCast(ctx));
         var arena: std.heap.ArenaAllocator = .init(r.gpa);
         defer arena.deinit();
@@ -215,10 +225,15 @@ pub const Runner = struct {
     pub fn stop(r: *Runner) void {
         if (r.watch) |w| w.cancel();
         r.watch = null;
-        if (r.child) |*c| {
-            c.kill(r.io);
+        r.state = .closing;
+        // A script that closed its output may still be working: stop it too.
+        if (r.reaping) |job| job.drop(true);
+        r.reaping = null;
+        if (r.child) |child| {
+            if (ProcessJob.start(child, true)) |job| job.release();
         }
         r.child = null;
+        r.state = .stopped;
     }
 
     fn readable(ctx: ?*anyopaque) callconv(.c) void {
@@ -241,13 +256,35 @@ pub const Runner = struct {
         if (r.meta.mode == .full_output) r.showOutput(false);
     }
 
-    fn ended(ctx: ?*anyopaque) callconv(.c) void {
+    pub fn ended(ctx: ?*anyopaque) callconv(.c) void {
         const r: *Runner = @ptrCast(@alignCast(ctx));
         if (r.watch) |w| w.cancel();
         r.watch = null;
-        var c = r.child orelse return;
+        const child = r.child orelse return;
         r.child = null;
-        const term = c.wait(r.io) catch null;
+        r.state = .closing;
+        r.reaping = ProcessJob.startNotify(child, false, r, completed);
+        if (r.reaping == null) r.complete(null);
+        r.hooks.redraw(r.hooks.ctx);
+    }
+
+    fn completed(ctx: *anyopaque) void {
+        tick(ctx, "");
+    }
+
+    fn tick(ctx: *anyopaque, _: []const u8) void {
+        const r: *Runner = @ptrCast(@alignCast(ctx));
+        const job = r.reaping orelse return;
+        if (!job.done.load(.acquire)) return;
+        const term = job.term;
+        job.owner = null;
+        job.release();
+        r.reaping = null;
+        r.complete(term);
+    }
+
+    fn complete(r: *Runner, term: ?std.process.Child.Term) void {
+        r.state = .stopped;
         const ok = if (term) |t| t.success() else false;
         const text = std.mem.trimEnd(u8, r.out.items, " \r\n");
         const last = if (std.mem.lastIndexOfScalar(u8, text, '\n')) |nl| text[nl + 1 ..] else text;

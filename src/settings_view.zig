@@ -16,15 +16,18 @@ const Choice = shortcut.Choice;
 const Palette = panel.Palette;
 const mac = @import("builtin").os.tag == .macos;
 
-const RowKind = enum { choice, suggest, files, digup, browser, login, menu_bar, sync, terms, updates, welcome, quit };
+pub const RowKind = enum { choice, suggest, files, digup, browser, login, menu_bar, sync, terms, updates, welcome, quit };
 
 /// As tall as its sections, never past the window. Tighter Mac spacing
 /// fits file search, DigUp, where searches open, and the menu bar icon.
 pub const height: f32 = if (mac) 666 else 560;
 
 pub const Settings = struct {
+    pub const Recording = enum { idle, recording, refused };
+
     open: bool = false,
-    sel: usize = 0,
+    /// A RowKind tag, never a position in the changing row list.
+    sel: usize = @backingInt(RowKind.choice),
     /// Return already handled for this key event (a frame may draw twice).
     took_return: bool = false,
     choice: Choice = .cmd_space,
@@ -32,14 +35,15 @@ pub const Settings = struct {
     custom: ?Choice = null,
     /// Waiting for a key to be pressed for the last chip; the one pressed
     /// last wasn't fit (no ⌘, ⌥ or ⌃).
-    recording: bool = false,
-    refused: bool = false,
+    recording: Recording = .idle,
+    record_host: ?*const SettingsHost = null,
+    failed_choice: ?Choice = null,
+    login_state: ?@import("settings_host.zig").LoginState = null,
     suggest: bool = true,
     files: bool = false,
     digup: bool = true,
     /// Return sends searches to the browser (`Nanolight.searches_out`).
     browser: bool = false,
-    login: bool = false,
     menu_bar: bool = true,
     account: account.State = .signed_out,
     email: []const u8 = "",
@@ -47,13 +51,50 @@ pub const Settings = struct {
     ready: ?[]const u8 = null,
 
     pub fn show(s: *Settings) void {
+        s.finishRecording();
+        s.failed_choice = null;
+        s.login_state = null;
         s.open = true;
-        s.sel = 0;
+        s.sel = @backingInt(RowKind.choice);
     }
 
     pub fn hide(s: *Settings) void {
         s.open = false;
-        s.recording = false;
+        s.finishRecording();
+    }
+
+    pub fn isRecording(s: *const Settings) bool {
+        return s.recording != .idle;
+    }
+
+    /// Every exit (including focus loss in the host) comes through here.
+    pub fn finishRecording(s: *Settings) void {
+        const h = s.record_host;
+        s.record_host = null;
+        s.recording = .idle;
+        if (h) |host| host.record(host.ctx, false);
+    }
+
+    fn refreshLogin(s: *Settings, h: *const SettingsHost, set: ?bool) void {
+        s.login_state = if (h.login_status) |status| status(h.ctx, set) else if (h.login(h.ctx, set)) .on else .off;
+    }
+
+    pub fn selected(s: *const Settings) RowKind {
+        return @fromBackingInt(@intCast(s.sel));
+    }
+
+    fn keepSelection(s: *Settings, rows: []const RowKind) void {
+        for (rows) |kind| if (@backingInt(kind) == s.sel) return;
+        // Terms disappeared: stay on the account, never drift to Quit.
+        s.sel = @backingInt(RowKind.sync);
+    }
+
+    fn move(s: *Settings, rows: []const RowKind, dir: i8) void {
+        for (rows, 0..) |kind, i| if (@backingInt(kind) == s.sel) {
+            const next = if (dir > 0) (i + 1) % rows.len else (i + rows.len - 1) % rows.len;
+            s.sel = @backingInt(rows[next]);
+            return;
+        };
     }
 
     fn hooks(s: *Settings, n: *panel.Nanolight) ?*const SettingsHost {
@@ -71,7 +112,7 @@ pub const Settings = struct {
         s.menu_bar = h.menu_bar(h.ctx, null);
         s.choice = h.choice(h.ctx);
         if (s.choice.preset() == null) s.custom = s.choice;
-        s.login = h.login(h.ctx, null);
+        if (s.login_state == null) s.refreshLogin(h, null);
         s.account = h.account(h.ctx);
         s.email = h.email(h.ctx);
         s.version = h.version(h.ctx);
@@ -81,7 +122,7 @@ pub const Settings = struct {
     pub fn view(s: *Settings, c: *ui.Context, n: *panel.Nanolight, p: Palette) void {
         s.pull(n);
         const rows = rowList(s.account);
-        if (s.sel >= rows.len) s.sel = rows.len - 1;
+        s.keepSelection(rows);
         s.keys(c, n, rows);
         ui.key(c, "settings");
         const f = motion.frame(c, .{ .initial = .{ .opacity = 0, .x = 14 }, .transition = .{ .spring = panel.spring } });
@@ -104,7 +145,7 @@ pub const Settings = struct {
     fn body(s: *Settings, c: *ui.Context, n: *panel.Nanolight, p: Palette, rows: []const RowKind) void {
         const col = ui.div(c).column().wFull().px(20).pt(2).pb(6).gap(if (mac) 6 else 10).grow();
         defer col.end();
-        label(c, p, "Open SamSearch with");
+        label(c, p, if (s.failed_choice) |key| c.print("Couldn't use {f}{f}: another app has it", .{ key.held(), key.key() }) else "Open SamSearch with");
         s.choices(c, n, p);
         label(c, p, "Search");
         s.switchRow(c, n, p, rows, .suggest, "Google Suggestions");
@@ -131,7 +172,7 @@ pub const Settings = struct {
         defer row.end();
         for (Choice.all) |ch| {
             ui.key(c, c.print("key-{d}-{d}", .{ ch.code, ch.mods }));
-            const on = ch.eql(s.choice) and !s.recording;
+            const on = ch.eql(s.choice) and !s.isRecording();
             const b = ui.div(c).row().h(36).px(14).itemsCenter().rounded(10).control()
                 .bg(if (on) p.sel else p.tile.alpha(0.5)).border(if (on) p.text.alpha(0.35) else p.rim);
             defer b.end();
@@ -142,29 +183,31 @@ pub const Settings = struct {
         // Carbon takes any key; a PC keeps to the four).
         if (!mac) return;
         ui.key(c, "key-own");
-        const on = s.recording or (s.custom != null and s.custom.?.eql(s.choice));
+        const on = s.isRecording() or (s.custom != null and s.custom.?.eql(s.choice));
         const b = ui.div(c).row().h(36).px(14).gap(6).itemsCenter().rounded(10).control()
             .bg(if (on) p.sel else p.tile.alpha(0.5)).border(if (on) p.text.alpha(0.35) else p.rim);
         defer b.end();
-        if (b.clicked()) s.record(n, !s.recording);
-        const text = if (s.refused) "Add ⌘, ⌥ or ⌃" else if (s.recording) "Type a shortcut" else if (s.custom) |k| c.print("{f}", .{k}) else "Record…";
+        if (b.clicked()) s.record(n, !s.isRecording());
+        const text = if (s.recording == .refused) "Add ⌘, ⌥ or ⌃" else if (s.isRecording()) "Type a shortcut" else if (s.custom) |k| c.print("{f}", .{k}) else "Record…";
         ui.text(c, text, .{ .size = 13.5, .weight = if (on) .semibold else .medium, .color = if (on) p.text else p.sub });
-        if (s.recording) ui.kbd(c, "esc");
+        if (s.isRecording()) ui.kbd(c, "esc");
     }
 
     /// Starts or stops waiting for a key of one's own.
     fn record(s: *Settings, n: *panel.Nanolight, on: bool) void {
-        s.recording = on;
-        s.refused = false;
-        const h = s.hooks(n) orelse return;
-        h.record(h.ctx, on);
+        if (!on) return s.finishRecording();
+        s.finishRecording();
+        s.failed_choice = null;
+        s.recording = .recording;
+        s.record_host = s.hooks(n);
+        if (s.record_host) |h| h.record(h.ctx, true);
     }
 
     /// A key pressed while recording: kept and used, or not.
     pub fn took(s: *Settings, n: *panel.Nanolight, r: shortcut.Recorded) void {
-        if (!s.recording) return;
+        if (!s.isRecording()) return;
         switch (r) {
-            .unusable => s.refused = true,
+            .unusable => s.recording = .refused,
             .cancel => s.record(n, false),
             .key => |k| {
                 s.record(n, false);
@@ -175,10 +218,17 @@ pub const Settings = struct {
     }
 
     fn pick(s: *Settings, n: *panel.Nanolight, ch: Choice) void {
-        if (s.recording) s.record(n, false);
+        if (s.isRecording()) s.record(n, false);
+        s.failed_choice = null;
+        if (s.hooks(n)) |h| {
+            if (h.try_apply) |apply| {
+                apply(h.ctx, ch) catch {
+                    s.failed_choice = ch;
+                    return;
+                };
+            } else h.apply(h.ctx, ch);
+        }
         s.choice = ch;
-        const h = s.hooks(n) orelse return;
-        h.apply(h.ctx, ch);
     }
 
     fn switchRow(s: *Settings, c: *ui.Context, n: *panel.Nanolight, p: Palette, rows: []const RowKind, kind: RowKind, title: []const u8) void {
@@ -188,12 +238,16 @@ pub const Settings = struct {
         if (d.clicked()) s.flip(n, kind);
         ui.text(c, title, .{ .size = 13.5, .weight = .medium, .color = p.text });
         ui.spacer(c);
+        if (kind == .login and s.login_state == .requires_approval) {
+            ui.text(c, "Needs approval in System Settings", .{ .size = 11.5, .color = p.sub });
+            return;
+        }
         mark(c, p, switch (kind) {
             .suggest => s.suggest,
             .files => s.files,
             .digup => s.digup,
             .browser => s.browser,
-            .login => s.login,
+            .login => s.login_state == .on,
             .menu_bar => s.menu_bar,
             else => false,
         });
@@ -217,22 +271,20 @@ pub const Settings = struct {
             .suggest => {
                 n.suggest_on = !n.suggest_on;
                 s.suggest = n.suggest_on;
-                n.built = 1;
                 if (h) |host| host.suggest(host.ctx, s.suggest);
+                n.rebuild();
             },
             .files => {
                 n.files_on = !n.files_on;
                 s.files = n.files_on;
-                n.built = 1;
                 if (n.kv) |kv| kv.set(@import("files.zig").enabled_key, if (n.files_on) "1" else "0") catch {};
+                n.rebuild();
             },
             .digup => {
                 n.digup_on = !n.digup_on;
                 s.digup = n.digup_on;
-                n.dug.deinit();
-                n.built = 1;
                 if (n.kv) |kv| kv.set(@import("digup.zig").enabled_key, if (n.digup_on) "1" else "0") catch {};
-                if (n.host) |host| if (host.digup) |ask| ask(host.ctx, n.query.text());
+                n.rebuild();
             },
             .browser => {
                 n.searches_out = !n.searches_out;
@@ -240,8 +292,13 @@ pub const Settings = struct {
                 if (h) |host| host.searches_out(host.ctx, s.browser);
             },
             .login => {
-                const next = !s.login;
-                s.login = if (h) |host| host.login(host.ctx, next) else next;
+                if (s.login_state == .requires_approval) {
+                    if (h) |host| if (host.login_settings) |open| open(host.ctx);
+                } else if (h) |host| {
+                    s.refreshLogin(host, s.login_state != .on);
+                } else {
+                    s.login_state = if (s.login_state == .on) .off else .on;
+                }
             },
             .menu_bar => {
                 const next = !s.menu_bar;
@@ -254,7 +311,7 @@ pub const Settings = struct {
     fn sync(s: *Settings, c: *ui.Context, n: *panel.Nanolight, p: Palette, rows: []const RowKind) void {
         switch (s.account) {
             .signed_out, .starting => {
-                s.button(c, n, p, rows, .sync, if (s.account == .starting) "Signing In…" else "Sign In with Codegraff");
+                s.button(c, n, p, rows, .sync, if (s.account == .starting) "Signing In… (Cancel)" else "Sign In with Codegraff");
                 s.termsLine(c, n, p, rows);
             },
             .waiting => {
@@ -314,13 +371,13 @@ pub const Settings = struct {
             return;
         }
         if (!s.returned(c)) s.took_return = false;
-        if (c.shortcut(.{ .key = S.down }) or c.shortcut(.{ .key = 'n', .ctrl = true })) s.sel = (s.sel + 1) % rows.len;
-        if (c.shortcut(.{ .key = S.up }) or c.shortcut(.{ .key = 'p', .ctrl = true })) s.sel = (s.sel + rows.len - 1) % rows.len;
+        if (c.shortcut(.{ .key = S.down }) or c.shortcut(.{ .key = 'n', .ctrl = true })) s.move(rows, 1);
+        if (c.shortcut(.{ .key = S.up }) or c.shortcut(.{ .key = 'p', .ctrl = true })) s.move(rows, -1);
         if (c.shortcut(.{ .key = S.left })) s.nudge(n, rows, -1);
         if (c.shortcut(.{ .key = S.right })) s.nudge(n, rows, 1);
         // Space is also typed into the field once Settings closes; only
         // Return and Space while this view has the keys.
-        if (c.shortcut(.{ .key = ' ' })) s.activate(n, rows[s.sel]);
+        if (c.shortcut(.{ .key = ' ' })) s.activateSelected(n);
     }
 
     /// Return, as a key or as the field's newline command.
@@ -348,12 +405,13 @@ pub const Settings = struct {
     pub fn activateSelected(s: *Settings, n: *panel.Nanolight) void {
         s.pull(n);
         const rows = rowList(s.account);
-        if (s.sel >= rows.len) return;
-        s.activate(n, rows[s.sel]);
+        s.keepSelection(rows);
+        s.activate(n, s.selected());
     }
 
     fn nudge(s: *Settings, n: *panel.Nanolight, rows: []const RowKind, dir: i8) void {
-        if (rows[s.sel] != .choice) return;
+        _ = rows;
+        if (s.selected() != .choice) return;
         s.pick(n, s.choice.step(dir));
     }
 
@@ -361,12 +419,11 @@ pub const Settings = struct {
         const h = s.hooks(n);
         switch (kind) {
             // ←/→ step through the four; Return records one's own.
-            .choice => if (mac) s.record(n, !s.recording) else s.nudge(n, rowList(s.account), 1),
+            .choice => if (mac) s.record(n, !s.isRecording()) else s.nudge(n, rowList(s.account), 1),
             .suggest, .files, .digup, .browser, .login, .menu_bar => s.flip(n, kind),
             .sync => if (h) |host| switch (s.account) {
                 .signed_out => host.sign_in(host.ctx),
-                .waiting, .signed_in => host.sign_out(host.ctx),
-                .starting => {},
+                .starting, .waiting, .signed_in => host.sign_out(host.ctx),
             },
             .terms => if (h) |host| host.terms(host.ctx),
             .updates => if (h) |host| {
@@ -376,7 +433,10 @@ pub const Settings = struct {
                 s.hide();
                 host.welcome(host.ctx);
             },
-            .quit => if (h) |host| host.quit(host.ctx),
+            .quit => if (h) |host| {
+                s.finishRecording();
+                host.quit(host.ctx);
+            },
         }
     }
 };
@@ -389,6 +449,6 @@ fn rowList(state: account.State) []const RowKind {
 }
 
 fn isSel(rows: []const RowKind, sel: usize, kind: RowKind) bool {
-    if (sel >= rows.len) return false;
-    return rows[sel] == kind;
+    _ = rows;
+    return sel == @backingInt(kind);
 }

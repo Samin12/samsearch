@@ -230,3 +230,215 @@ test "SamSearch handoffs use local previews and page-specific command Return" {
         try std.testing.expect(!s.previewing and web.page_len == null);
     }
 }
+
+const StatefulPrefs = struct {
+    prefs: tests.Prefs = .{},
+    state: @import("account.zig").State = .signed_out,
+    quits: usize = 0,
+    welcomes: usize = 0,
+    cancels: usize = 0,
+    login_reads: usize = 0,
+    login_opens: usize = 0,
+    digup_requests: usize = 0,
+    files_requests: usize = 0,
+    google_requests: usize = 0,
+    login_state: @import("settings_host.zig").LoginState = .off,
+
+    fn init(p: *StatefulPrefs) void {
+        p.prefs.init();
+        p.prefs.box.account = acct;
+        p.prefs.box.quit = quit;
+        p.prefs.box.welcome = welcome;
+        p.prefs.box.sign_out = cancel;
+        p.prefs.box.login_status = login;
+        p.prefs.box.login_settings = openLogin;
+    }
+    fn from(ctx: *anyopaque) *StatefulPrefs {
+        const prefs: *tests.Prefs = @ptrCast(@alignCast(ctx));
+        return @fieldParentPtr("prefs", prefs);
+    }
+    fn acct(ctx: *anyopaque) @import("account.zig").State {
+        return from(ctx).state;
+    }
+    fn quit(ctx: *anyopaque) void {
+        from(ctx).quits += 1;
+    }
+    fn welcome(ctx: *anyopaque) void {
+        from(ctx).welcomes += 1;
+    }
+    fn cancel(ctx: *anyopaque) void {
+        from(ctx).cancels += 1;
+    }
+    fn login(ctx: *anyopaque, set: ?bool) @import("settings_host.zig").LoginState {
+        const p = from(ctx);
+        p.login_reads += 1;
+        if (set) |on| p.login_state = if (on) .on else .off;
+        return p.login_state;
+    }
+    fn openLogin(ctx: *anyopaque) void {
+        from(ctx).login_opens += 1;
+    }
+    fn askDigup(ctx: *anyopaque, _: []const u8) void {
+        from(ctx).digup_requests += 1;
+    }
+    fn askFiles(ctx: *anyopaque, _: []const u8) void {
+        from(ctx).files_requests += 1;
+    }
+    fn askGoogle(ctx: *anyopaque, _: []const u8) void {
+        from(ctx).google_requests += 1;
+    }
+    fn reject(_: *anyopaque, _: @import("shortcut.zig").Choice) anyerror!void {
+        return error.ShortcutTaken;
+    }
+};
+
+test "every recording exit clears the fake monitor and refused state" {
+    if (!mac) return error.SkipZigTest;
+    const Exit = enum { close, show, focus_lost, escape, taken, welcome, quit };
+    for (std.enums.values(Exit)) |exit| {
+        var ix: Index = .init(std.testing.allocator);
+        defer ix.deinit();
+        var prefs: StatefulPrefs = .{};
+        prefs.init();
+        var s: view.Nanolight = .{ .index = &ix };
+        defer s.query.deinit();
+        s.host = prefs.prefs.host();
+        s.openSettings();
+        s.settings_ui.activateSelected(&s);
+        try std.testing.expect(prefs.prefs.recording);
+        s.settings_ui.took(&s, .unusable);
+        try std.testing.expectEqual(.refused, s.settings_ui.recording);
+        switch (exit) {
+            .close => s.settings_ui.hide(),
+            .show => s.settings_ui.show(),
+            .focus_lost => s.settings_ui.finishRecording(),
+            .escape => s.settings_ui.took(&s, .cancel),
+            .taken => s.settings_ui.took(&s, .{ .key = .opt_space }),
+            .welcome, .quit => {
+                s.settings_ui.sel = @backingInt(if (exit == .welcome) settings_view.RowKind.welcome else settings_view.RowKind.quit);
+                s.settings_ui.activateSelected(&s);
+            },
+        }
+        try std.testing.expect(!prefs.prefs.recording);
+        try std.testing.expectEqual(.idle, s.settings_ui.recording);
+        if (exit == .welcome) try std.testing.expectEqual(@as(usize, 1), prefs.welcomes);
+        if (exit == .quit) try std.testing.expectEqual(@as(usize, 1), prefs.quits);
+    }
+}
+
+test "Settings selection follows row kind across account row changes" {
+    var ix: Index = .init(std.testing.allocator);
+    defer ix.deinit();
+    var prefs: StatefulPrefs = .{};
+    prefs.init();
+    var s: view.Nanolight = .{ .index = &ix };
+    defer s.query.deinit();
+    s.host = prefs.prefs.host();
+    s.openSettings();
+    // An async sign-in removes Terms: Updates stays Updates on Return.
+    s.settings_ui.sel = @backingInt(settings_view.RowKind.updates);
+    prefs.state = .signed_in;
+    s.settings_ui.activateSelected(&s);
+    try std.testing.expectEqual(settings_view.RowKind.updates, s.settings_ui.selected());
+    try std.testing.expectEqual(@as(usize, 0), prefs.quits + prefs.welcomes);
+    prefs.state = .signed_out;
+    s.settings_ui.activateSelected(&s);
+    try std.testing.expectEqual(settings_view.RowKind.updates, s.settings_ui.selected());
+    // If Terms itself vanishes, selection falls back to the account.
+    s.settings_ui.sel = @backingInt(settings_view.RowKind.terms);
+    prefs.state = .starting;
+    prefs.state = .waiting;
+    s.settings_ui.activateSelected(&s);
+    try std.testing.expectEqual(settings_view.RowKind.sync, s.settings_ui.selected());
+    try std.testing.expectEqual(@as(usize, 1), prefs.cancels);
+    try std.testing.expectEqual(@as(usize, 0), prefs.quits + prefs.welcomes);
+    prefs.state = .starting;
+    s.settings_ui.activateSelected(&s);
+    try std.testing.expectEqual(@as(usize, 2), prefs.cancels);
+}
+
+test "shortcut registration failure stays on the previous choice and is shown" {
+    if (!mac) return error.SkipZigTest;
+    var ix: Index = .init(std.testing.allocator);
+    defer ix.deinit();
+    var prefs: StatefulPrefs = .{};
+    prefs.init();
+    prefs.prefs.box.try_apply = StatefulPrefs.reject;
+    var s: view.Nanolight = .{ .index = &ix };
+    defer s.query.deinit();
+    s.host = prefs.prefs.host();
+    s.openSettings();
+    var tester: ui.Tester = undefined;
+    try tester.init(std.testing.allocator, .init(&s, view.Nanolight.view), .{ .width = view.width, .height = view.max_height, .dark = true });
+    defer tester.deinit();
+    tester.settle(1);
+    _ = tester.shortcut(.{ .key = ui.Shortcut.right });
+    tester.settle(1);
+    try std.testing.expect(s.settings_ui.choice.eql(.cmd_space));
+    try std.testing.expect(s.settings_ui.failed_choice.?.eql(.opt_space));
+    try std.testing.expect(tester.hasText("Couldn't use ⌥Space: another app has it"));
+}
+
+test "login approval is visible and login status is cached until Settings shows again" {
+    var ix: Index = .init(std.testing.allocator);
+    defer ix.deinit();
+    var prefs: StatefulPrefs = .{};
+    prefs.init();
+    prefs.login_state = .requires_approval;
+    var s: view.Nanolight = .{ .index = &ix };
+    defer s.query.deinit();
+    s.host = prefs.prefs.host();
+    s.openSettings();
+    var tester: ui.Tester = undefined;
+    try tester.init(std.testing.allocator, .init(&s, view.Nanolight.view), .{ .width = view.width, .height = view.max_height, .dark = true });
+    defer tester.deinit();
+    tester.settle(1);
+    try std.testing.expect(tester.hasText("Needs approval in System Settings"));
+    tester.frame();
+    tester.frame();
+    try std.testing.expectEqual(@as(usize, 1), prefs.login_reads);
+    s.settings_ui.sel = @backingInt(settings_view.RowKind.login);
+    s.settings_ui.activateSelected(&s);
+    try std.testing.expectEqual(@as(usize, 1), prefs.login_opens);
+    try std.testing.expectEqual(@as(usize, 1), prefs.login_reads);
+    s.settings_ui.hide();
+    s.openSettings();
+    tester.settle(1);
+    try std.testing.expectEqual(@as(usize, 2), prefs.login_reads);
+}
+
+test "Settings source toggles immediately invalidate results and request each source once" {
+    // The DigUp and Files rows are the Mac's.
+    if (!mac) return error.SkipZigTest;
+    var ix: Index = .init(std.testing.allocator);
+    defer ix.deinit();
+    var prefs: StatefulPrefs = .{};
+    prefs.init();
+    var s: view.Nanolight = .{ .index = &ix };
+    defer s.query.deinit();
+    defer s.dug.deinit();
+    defer s.found.deinit();
+    var host = prefs.prefs.host();
+    host.digup = StatefulPrefs.askDigup;
+    host.files = StatefulPrefs.askFiles;
+    host.suggest = StatefulPrefs.askGoogle;
+    s.host = host;
+    s.query.set("report");
+    s.rebuild();
+    s.openSettings();
+    for ([_]settings_view.RowKind{ .digup, .files, .suggest }) |kind| {
+        const generation = s.pipeline.generation;
+        prefs.digup_requests = 0;
+        prefs.files_requests = 0;
+        prefs.google_requests = 0;
+        s.settings_ui.sel = @backingInt(kind);
+        s.settings_ui.activateSelected(&s);
+        try std.testing.expect(s.pipeline.generation != generation);
+        try std.testing.expectEqual(@as(usize, 1), prefs.digup_requests);
+        try std.testing.expect(prefs.files_requests <= 1 and prefs.google_requests <= 1);
+        // A second frame/rebuild cannot issue another copy of a request.
+        s.rebuild();
+        try std.testing.expectEqual(@as(usize, 1), prefs.digup_requests);
+        try std.testing.expect(prefs.files_requests <= 1 and prefs.google_requests <= 1);
+    }
+}

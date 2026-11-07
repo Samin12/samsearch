@@ -33,8 +33,9 @@ pub fn target(s: *const view.Nanolight, c: *const nanoui.ui.Context, p: nanoui.u
             break;
         }
     }
-    for (s.row_ids, 0..) |id, i| if (id != 0 and id == hot and i < s.res.n) {
-        const row = s.res.rows[i];
+    for (s.row_ids, 0..) |id, i| if (id != 0 and id == hot) {
+        const key = s.row_keys[i] orelse return .control;
+        const row = s.rowByKey(key) orelse return .control;
         if (s.filePath(row)) |path| if (draggable(row.kind, path)) return .{ .file = path };
         return .window;
     };
@@ -49,6 +50,8 @@ pub fn target(s: *const view.Nanolight, c: *const nanoui.ui.Context, p: nanoui.u
     return if (hot == 0) .window else .control;
 }
 
+pub const State = enum { idle, candidate, window, file };
+
 pub const Drag = struct {
     window: ?*nanoui.Window = null,
     s: ?*view.Nanolight = null,
@@ -59,10 +62,21 @@ pub const Drag = struct {
     start_at: objc.CGPoint = .{},
     path: [@import("files.zig").max_path]u8 = undefined,
     path_len: usize = 0,
-    candidate: bool = false,
-    /// The drag session keeps the panel alive until its source callback.
-    active: bool = false,
-    swallowing: bool = false,
+    state: State = .idle,
+    on_hide: ?struct { ctx: *anyopaque, func: *const fn (*anyopaque) void } = null,
+
+    pub fn active(d: *const Drag) bool {
+        return d.state == .window or d.state == .file;
+    }
+
+    pub fn reset(d: *Drag) void {
+        d.clear();
+        d.state = .idle;
+        if (d.through) |through| {
+            through.holding = false;
+            through.update();
+        }
+    }
 
     pub fn start(d: *Drag, w: *nanoui.Window, s: *view.Nanolight, through: *ClickThrough) void {
         d.window = w;
@@ -91,7 +105,7 @@ pub const Drag = struct {
             objc.release(m);
             d.monitor = null;
         }
-        d.clear();
+        d.reset();
         if (d.source) |s| {
             objc.setZig(s, null);
             objc.release(s);
@@ -102,7 +116,6 @@ pub const Drag = struct {
     fn clear(d: *Drag) void {
         if (d.down) |ev| objc.release(ev);
         d.down = null;
-        d.candidate = false;
         d.path_len = 0;
     }
 
@@ -119,21 +132,16 @@ pub const Drag = struct {
     fn event(d: *Drag, ev: objc.Object) ?objc.Object {
         const w = d.window orelse return ev;
         const ty = objc.msg(objc.NSUInteger, ev, "type", .{});
-        if (d.active) return ev;
+        if (d.active()) return ev;
         if (ty == 2) {
-            const swallow = d.swallowing;
-            d.swallowing = false;
-            d.clear();
-            d.through.?.holding = false;
-            d.through.?.update();
-            return if (swallow) null else ev;
+            d.reset();
+            return ev;
         }
         if (objc.msg(?objc.Object, ev, "window", .{}) != w.nswindow or !w.isVisible()) return ev;
         const surface = w.surface orelse return ev;
         const at = objc.msg(objc.CGPoint, ev, "locationInWindow", .{});
         if (ty == 1) {
-            d.clear();
-            d.swallowing = false;
+            d.reset();
             if (objc.msg(objc.NSUInteger, ev, "modifierFlags", .{}) & (1 << 18) != 0) return ev;
             const p = surface.toView(at);
             const s = d.s.?;
@@ -154,24 +162,22 @@ pub const Drag = struct {
             surface.ctx.updateHot();
             d.start_at = at;
             d.down = objc.retain(ev);
-            d.candidate = true;
+            d.state = .candidate;
             return if (surface.ctx.hot == 0) null else ev;
         }
-        if (ty != 6 or !d.candidate or !pastThreshold(d.start_at, at)) return ev;
+        if (ty != 6 or d.state != .candidate or !pastThreshold(d.start_at, at)) return ev;
         d.cancelPress();
-        d.candidate = false;
-        d.swallowing = true;
         if (d.path_len > 0) {
             d.beginFile(ev);
         } else {
             // AppKit tracks the move; the fixed-size window keeps its top edge.
-            d.active = true;
+            d.state = .window;
             objc.msg(void, w.nswindow, "performWindowDragWithEvent:", .{d.down.?});
-            d.active = false;
-            d.swallowing = false;
+            d.reset();
             @import("panel_mac.zig").remember(w);
             d.through.?.holding = false;
             d.through.?.update();
+            if (!w.isFocused()) if (d.on_hide) |h| h.func(h.ctx);
         }
         d.clear();
         return null;
@@ -180,7 +186,10 @@ pub const Drag = struct {
     fn beginFile(d: *Drag, ev: objc.Object) void {
         const pool = objc.Pool.push();
         defer pool.pop();
-        const surface = d.window.?.surface orelse return;
+        const surface = d.window.?.surface orelse {
+            d.reset();
+            return;
+        };
         const path = objc.nsString(d.path[0..d.path_len]);
         const url = objc.msg(objc.Object, objc.class("NSURL"), "fileURLWithPath:", .{path});
         const item = objc.msg(objc.Object, objc.alloc("NSDraggingItem"), "initWithPasteboardWriter:", .{url});
@@ -191,13 +200,12 @@ pub const Drag = struct {
         const frame: objc.CGRect = .{ .origin = .{ .x = at.x - 16, .y = at.y - 16 }, .size = .{ .width = 32, .height = 32 } };
         objc.msg(void, item, "setDraggingFrame:contents:", .{ frame, image });
         const items = objc.msg(objc.Object, objc.class("NSArray"), "arrayWithObject:", .{item});
-        d.active = true;
+        d.state = .file;
         const session = objc.msg(?objc.Object, surface.nsview, "beginDraggingSessionWithItems:event:source:", .{ items, ev, d.source.? });
         if (session) |s| {
             objc.msg(void, s, "setAnimatesToStartingPositionsOnCancelOrFail:", .{objc.YES});
         } else {
-            d.active = false;
-            d.through.?.holding = false;
+            d.reset();
         }
     }
 };
@@ -213,15 +221,11 @@ fn ignoreModifiers(_: objc.Object, _: objc.SEL, _: objc.Object) callconv(.c) obj
 
 fn ended(obj: objc.Object, _: objc.SEL, _: objc.Object, _: objc.CGPoint, _: objc.NSUInteger) callconv(.c) void {
     const d = objc.getZig(Drag, obj) orelse return;
-    d.active = false;
-    d.swallowing = false;
-    d.clear();
+    d.reset();
     d.cancelPress();
-    d.through.?.holding = false;
     const w = d.window orelse return;
     if (!w.isFocused()) {
-        d.through.?.stop();
-        w.hide();
+        if (d.on_hide) |h| h.func(h.ctx);
     } else d.through.?.update();
 }
 

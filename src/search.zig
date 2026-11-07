@@ -11,6 +11,34 @@
 const std = @import("std");
 const text = @import("text.zig");
 
+pub const Source = enum { google, files, digup, gmail };
+pub const Status = enum { idle, pending, answered, failed };
+
+/// All sources answer the same query generation.
+pub const Query = struct {
+    generation: u64 = 0,
+    sources: [4]Status = @splat(.idle),
+
+    pub fn begin(q: *Query) void {
+        q.generation +%= 1;
+        q.sources = @splat(.idle);
+    }
+
+    pub fn set(q: *Query, source: Source, state: Status) void {
+        q.sources[@backingInt(source)] = state;
+    }
+
+    pub fn status(q: *const Query, source: Source) Status {
+        return q.sources[@backingInt(source)];
+    }
+
+    pub fn finish(q: *Query, generation: u64, source: Source, state: Status) bool {
+        if (generation != q.generation) return false;
+        q.set(source, state);
+        return true;
+    }
+};
+
 /// Up to this many matched bytes are kept for highlighting.
 pub const max_hits = 32;
 

@@ -23,8 +23,8 @@ pub fn set(service: []const u8, account: []const u8, secret: []const u8) bool {
     return impl.set(service, account, secret);
 }
 
-pub fn remove(service: []const u8, account: []const u8) void {
-    impl.remove(service, account);
+pub fn remove(service: []const u8, account: []const u8) bool {
+    return impl.remove(service, account);
 }
 
 const Windows = struct {
@@ -49,6 +49,9 @@ const Windows = struct {
     extern "advapi32" fn CredReadW(target: [*:0]const u16, kind: u32, flags: u32, out: *?*CREDENTIALW) callconv(.winapi) i32;
     extern "advapi32" fn CredDeleteW(target: [*:0]const u16, kind: u32, flags: u32) callconv(.winapi) i32;
     extern "advapi32" fn CredFree(buf: ?*anyopaque) callconv(.winapi) void;
+    extern "kernel32" fn GetLastError() callconv(.winapi) u32;
+    /// ERROR_NOT_FOUND: there was nothing to delete.
+    const error_not_found: u32 = 1168;
 
     /// "service/account", as UTF-16.
     fn target(buf: *[512:0]u16, service: []const u8, account: []const u8) ?[*:0]u16 {
@@ -77,10 +80,11 @@ const Windows = struct {
         return CredWriteW(&cred, 0) != 0;
     }
 
-    fn remove(service: []const u8, account: []const u8) void {
+    fn remove(service: []const u8, account: []const u8) bool {
         var buf: [512:0]u16 = undefined;
-        const t = target(&buf, service, account) orelse return;
-        _ = CredDeleteW(t, cred_type_generic, 0);
+        const t = target(&buf, service, account) orelse return false;
+        if (CredDeleteW(t, cred_type_generic, 0) != 0) return true;
+        return GetLastError() == error_not_found;
     }
 };
 
@@ -122,10 +126,11 @@ const File = struct {
         return std.c.write(fd, secret.ptr, secret.len) == secret.len;
     }
 
-    fn remove(service: []const u8, account: []const u8) void {
+    fn remove(service: []const u8, account: []const u8) bool {
         const gpa = std.heap.page_allocator;
-        const p = path(gpa, service, account) orelse return;
+        const p = path(gpa, service, account) orelse return false;
         defer gpa.free(p);
-        std.Io.Dir.cwd().deleteFile(io(), p) catch {};
+        std.Io.Dir.cwd().deleteFile(io(), p) catch |err| return err == error.FileNotFound;
+        return true;
     }
 };

@@ -4,7 +4,7 @@ const fs = require("fs");
 const path = require("path");
 const Module = require("module");
 const React = require("react");
-const { send, log, listen } = require("./protocol");
+const { send, log, listen, stop } = require("./protocol");
 const env = require("./environment");
 const api = require("./api");
 const nav = require("./navigation");
@@ -59,6 +59,34 @@ if (typeof Module.registerHooks === "function") {
 
 require.cache[RAYCAST_API] = { id: RAYCAST_API, filename: RAYCAST_API, loaded: true, exports: api };
 
+// Flush the error before exiting so Zig can retain the last diagnostic.
+function crashed(error) {
+  const message = error && error.message ? error.message : String(error);
+  log(error && error.stack ? error.stack : message);
+  stop(message);
+  send({ type: "error", message });
+  process.stdout.write(JSON.stringify({ type: "exit" }) + "\n", () => process.exit(1));
+}
+process.on("uncaughtException", crashed);
+process.on("unhandledRejection", crashed);
+
+function listenCommand() {
+  listen((msg) => {
+    if (!msg || !msg.type) return;
+    if (msg.viewId != null && msg.viewId !== reconciler.getViewId()) return;
+    if (msg.type === "search") reconciler.setSearch(msg.text || "");
+    else if (msg.type === "select") reconciler.setSelected(msg.id);
+    else if (msg.type === "action") reconciler.runActionById(msg.id);
+    else if (msg.type === "field") reconciler.setField(msg.id, msg.value);
+    else if (msg.type === "pop") {
+      if (!nav.pop()) {
+        require("./install").cancelInstall();
+        send({ type: "pop_to_root" });
+      }
+    }
+  });
+}
+
 function loadCommand(dir, name) {
   const file = path.join(dir, "commands", name + ".js");
   if (!fs.existsSync(file)) {
@@ -78,6 +106,7 @@ function renderError(message) {
 }
 
 async function runCommand(dir, name) {
+  listenCommand();
   const abs = path.resolve(dir);
   const { command } = env.init(abs, name);
   api.__internal.refreshEnvironment();
@@ -88,8 +117,7 @@ async function runCommand(dir, name) {
   } catch (err) {
     log(err && err.stack ? err.stack : err);
     send({ type: "error", message: err && err.message ? err.message : String(err) });
-    if (mode !== "no-view") renderError(err && err.message ? err.message : String(err));
-    else send({ type: "exit" });
+    renderError(err && err.message ? err.message : String(err));
     return;
   }
   const exported = mod && mod.__esModule ? mod.default || mod : mod.default || mod;
@@ -100,8 +128,9 @@ async function runCommand(dir, name) {
       log(err && err.stack ? err.stack : err);
       send({ type: "error", message: err && err.message ? err.message : String(err) });
     }
+    stop();
     send({ type: "exit" });
-    setTimeout(() => process.exit(0), 30);
+    process.stdout.write("", () => process.exit(0));
     return;
   }
   if (typeof exported !== "function") {
@@ -122,29 +151,10 @@ function runStore(extensionsDir) {
 
 /// A view's element on screen, kept up, and the panel's keys taken.
 function mountView(element) {
+  listenCommand();
   process.stdin.resume();
-  setInterval(() => {}, 1e9);
   nav.reset(element);
   reconciler.mount(element);
-  setTimeout(() => {
-    const node = reconciler.getRoot && reconciler.getRoot();
-    if (node) reconciler.initDropdown(node);
-  }, 50);
-  listen((msg) => {
-    if (!msg || !msg.type) return;
-    if (msg.type === "search") reconciler.setSearch(msg.text || "");
-    else if (msg.type === "select") reconciler.setSelected(msg.id);
-    else if (msg.type === "action") reconciler.runActionById(msg.id);
-    else if (msg.type === "field") reconciler.setField(msg.id, msg.value);
-    else if (msg.type === "pop") {
-      const popped = nav.pop();
-      if (!popped) send({ type: "pop_to_root" });
-      else {
-        const top = nav.top();
-        if (top) reconciler.update(top);
-      }
-    }
-  });
 }
 
 module.exports = { runCommand, runStore, loadCommand };

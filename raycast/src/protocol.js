@@ -18,25 +18,49 @@ function nextId() {
 }
 
 const pending = new Map();
+let stopped = false;
+let reader = null;
+let onMessage = () => {};
 
-function request(method, params) {
+function stop(reason = "Raycast host stopped") {
+  stopped = true;
+  for (const { reject, timer } of pending.values()) {
+    clearTimeout(timer);
+    reject(new Error(reason));
+  }
+  pending.clear();
+}
+
+function request(method, params, timeoutMs = 15000) {
+  if (stopped) return Promise.reject(new Error("Raycast host stopped"));
+  listen();
   const id = nextId();
-  return new Promise((resolve) => {
-    pending.set(id, resolve);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pending.delete(id);
+      reject(new Error("Raycast request timed out: " + method));
+    }, timeoutMs);
+    pending.set(id, { resolve, reject, timer });
     send({ type: "request", id, method, params: params || {} });
   });
 }
 
 function handleReply(msg) {
-  const resolve = pending.get(msg.id);
-  if (resolve) {
-    pending.delete(msg.id);
-    resolve(msg.result);
-  }
+  const entry = pending.get(msg.id);
+  if (!entry) return;
+  pending.delete(msg.id);
+  clearTimeout(entry.timer);
+  if (msg.error) entry.reject(new Error(String(msg.error)));
+  else entry.resolve(msg.result);
 }
 
-function listen(onMessage) {
+function listen(handler) {
+  if (handler) onMessage = handler;
+  if (reader) return reader;
   const rl = readline.createInterface({ input: process.stdin });
+  reader = rl;
+  rl.on("close", () => stop("Raycast input closed"));
+  process.once("exit", () => stop());
   rl.on("line", (line) => {
     const text = String(line || "").trim();
     if (!text) return;
@@ -67,4 +91,4 @@ function listen(onMessage) {
   return rl;
 }
 
-module.exports = { send, log, request, listen };
+module.exports = { send, log, request, listen, stop };

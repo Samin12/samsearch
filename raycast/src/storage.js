@@ -4,8 +4,19 @@ const fs = require("fs");
 const path = require("path");
 const { state } = require("./environment");
 
+function atomicWrite(file, data) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = file + ".tmp-" + process.pid + "-" + require("crypto").randomUUID();
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(data), { mode: 0o600 });
+    fs.renameSync(tmp, file);
+  } finally {
+    fs.rmSync(tmp, { force: true });
+  }
+}
+
 function storagePath() {
-  return path.join(state.extensionDir, "local-storage.json");
+  return path.join(state.storageDir || state.extensionDir, "local-storage.json");
 }
 
 function readAll() {
@@ -17,8 +28,7 @@ function readAll() {
 }
 
 function writeAll(data) {
-  fs.mkdirSync(state.extensionDir, { recursive: true });
-  fs.writeFileSync(storagePath(), JSON.stringify(data));
+  atomicWrite(storagePath(), data);
 }
 
 const LocalStorage = {
@@ -28,7 +38,7 @@ const LocalStorage = {
   },
   async setItem(key, value) {
     const data = readAll();
-    data[key] = String(value);
+    data[key] = value;
     writeAll(data);
   },
   async removeItem(key) {
@@ -83,9 +93,7 @@ class Cache {
   }
 
   write(data) {
-    const dir = path.dirname(this.file());
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(this.file(), JSON.stringify(data));
+    atomicWrite(this.file(), data);
   }
 
   get(key) {
@@ -121,4 +129,4 @@ class Cache {
   }
 }
 
-module.exports = { LocalStorage, Cache };
+module.exports = { LocalStorage, Cache, atomicWrite };

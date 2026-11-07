@@ -25,6 +25,8 @@ pub const Pressed = struct { ctx: *anyopaque, func: *const fn (ctx: *anyopaque) 
 var pressed: ?Pressed = null;
 var installed = false;
 var current: ?*anyopaque = null;
+var current_code: u32 = 0;
+var current_mods: u32 = 0;
 
 fn handle(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque) callconv(.c) i32 {
     if (pressed) |p| p.func(p.ctx);
@@ -36,16 +38,36 @@ fn handle(_: ?*anyopaque, _: ?*anyopaque, _: ?*anyopaque) callconv(.c) i32 {
 /// grants it even when another app holds the same keys (`shortcut.zig`
 /// looks for those).
 pub fn registerKey(key: u32, modifiers: u32, on: Pressed) !void {
-    pressed = on;
     if (!installed) {
         const spec = [_]EventTypeSpec{.{ .class = fourcc("keyb"), .kind = 5 }}; // kEventHotKeyPressed
         if (InstallEventHandler(GetApplicationEventTarget(), &handle, 1, &spec, null, null) != 0) return error.HandlerFailed;
         installed = true;
     }
-    if (current) |r| _ = UnregisterEventHotKey(r);
-    current = null;
-    if (RegisterEventHotKey(key, modifiers, .{ .signature = fourcc("nsPL"), .id = 1 }, GetApplicationEventTarget(), 0, &current) != 0) return error.HotKeyTaken;
+    if (current != null and current_code == key and current_mods == modifiers) {
+        pressed = on;
+        return;
+    }
+    current = try @import("hotkey.zig").replace(Registration, .{ .key = key, .modifiers = modifiers }, current);
+    current_code = key;
+    current_mods = modifiers;
+    pressed = on;
 }
+
+const Registration = struct {
+    key: u32,
+    modifiers: u32,
+    pub const Handle = *anyopaque;
+
+    pub fn acquire(r: Registration) !Handle {
+        var next: ?*anyopaque = null;
+        if (RegisterEventHotKey(r.key, r.modifiers, .{ .signature = fourcc("nsPL"), .id = 1 }, GetApplicationEventTarget(), 0, &next) != 0) return error.HotKeyTaken;
+        return next orelse error.HotKeyTaken;
+    }
+
+    pub fn release(_: Registration, ref: Handle) void {
+        _ = UnregisterEventHotKey(ref);
+    }
+};
 
 /// `choice`'s key with its modifiers (hotkey.zig).
 pub fn register(choice: @import("shortcut.zig").Choice, on: Pressed) !void {

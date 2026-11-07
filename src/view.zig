@@ -37,6 +37,10 @@ pub const Host = struct {
     /// Shows a search's page in the panel, over `webArea`; null takes it
     /// away. Without it, searches open in the browser.
     preview: ?*const fn (ctx: *anyopaque, url: ?[]const u8) void = null,
+    /// Moves the Quick Ask conversation shown in the panel to its floating
+    /// window, then calls `answerMoved`. Without it, the question is asked
+    /// again there.
+    move_answer: ?*const fn (ctx: *anyopaque) void = null,
     /// Settings callbacks; without them, changes are not persisted.
     settings: ?*const SettingsHost = null,
 };
@@ -82,6 +86,11 @@ pub const Nanolight = struct {
     sel: usize = 0,
     /// The query the rows were built for.
     built: u64 = 1,
+    pipeline: @import("search.zig").Query = .{},
+    query_hash: ?u64 = null,
+    source_flags: u3 = 0,
+    filled_lists: u64 = 0,
+    numbers: [9]?results.RowKey = @splat(null),
     host: ?Host = null,
     /// Draws its own Liquid Glass (over a desktop nanoui painted, as the
     /// film does); otherwise the window's system glass is under it.
@@ -97,6 +106,7 @@ pub const Nanolight = struct {
     /// Each showing gets a new one: the panel comes in again.
     shown: u32 = 0,
     copied_at: f64 = -10,
+    copied_query: ?u64 = null,
     kv: ?nanoui.kv.Store = null,
     spans: [results.max_rows][16]ui.Span = undefined,
     url_buf: [1024]u8 = undefined,
@@ -114,6 +124,7 @@ pub const Nanolight = struct {
     dug: digup.List = .{},
     /// Last frame's controls, for the Mac's native drag gestures.
     row_ids: [results.max_rows]u64 = @splat(0),
+    row_keys: [results.max_rows]?results.RowKey = @splat(null),
     query_id: u64 = 0,
     /// Google's completions: whether to ask, those listed, the answers.
     suggest_on: bool = true,
@@ -197,6 +208,8 @@ pub const Nanolight = struct {
         // A Raycast extension's command, while it runs (raycast_view.zig).
         if (s.ext) |e| if (e.open) return e.panel(c, s, p);
 
+        // Settings and index refreshes can invalidate rows between frames.
+        if (s.built != std.hash.Wyhash.hash(0, s.query.text()) or s.filled_lists != s.listsHash()) s.rebuild();
         s.keys(c);
         const submitted = s.header(c, p);
         s.rebuild();
@@ -281,7 +294,6 @@ pub const Nanolight = struct {
         const bar = ui.div(c).row().wFull().h(header_h).px(18).gap(12).itemsCenter();
         defer bar.end();
         ui.icon(c, "magnifyingglass", .{ .size = 19, .weight = .medium, .color = p.sub, .frame = 22 });
-        s.rebuild();
         s.query_id = c.peekId(null);
         const r = ui.textField(c, &s.query, .{
             .suggestion = s.completion(),
@@ -328,23 +340,52 @@ pub const Nanolight = struct {
         s.query.want_selection = .{ len, len };
     }
 
-    /// Rebuild changed queries, asking for missing completions.
+    /// One generation for a query and its enabled sources.
     pub fn rebuild(s: *Nanolight) void {
         const q = s.query.text();
         const h = std.hash.Wyhash.hash(0, q);
-        if (h == s.built) return;
+        const flags = @as(u3, @intFromBool(s.suggest_on)) |
+            (@as(u3, @intFromBool(s.files_on)) << 1) | (@as(u3, @intFromBool(s.digup_on)) << 2);
+        const changed = s.query_hash == null or s.query_hash.? != h or s.source_flags != flags;
+        if (!changed) {
+            if (s.built != h or s.filled_lists != s.listsHash()) {
+                s.built = h;
+                s.refill();
+            }
+            return;
+        }
+        s.query_hash = h;
+        s.source_flags = flags;
         s.built = h;
+        s.pipeline.begin();
+        s.numbers = @splat(null);
+        s.copied_query = null;
+        s.sel = 0;
         files_view.rebuild(s);
         s.dug.deinit();
-        if (s.host) |host| if (host.digup) |ask| ask(host.ctx, q);
-        s.web.n = 0;
-        if (s.host) |host| if (host.suggest) |ask| if (s.suggest_on and suggest.eligible(q) and @import("calc.zig").eval(q) == null) {
-            if (!s.cache.lookup(q, &s.web)) ask(host.ctx, q);
+        if (s.host) |host| if (host.digup) |ask| {
+            if (s.digup_on and digup.eligible(std.mem.trim(u8, q, " \t\r\n"))) s.pipeline.set(.digup, .pending);
+            ask(host.ctx, q);
         };
+        s.web.n = 0;
+        if (s.suggest_on and suggest.eligible(q) and @import("calc.zig").eval(q) == null) {
+            if (s.cache.lookup(q, &s.web)) {
+                s.pipeline.set(.google, .answered);
+            } else if (s.host) |host| if (host.suggest) |ask| {
+                s.pipeline.set(.google, .pending);
+                ask(host.ctx, q);
+            };
+        }
+        s.pipeline.set(.gmail, .answered);
         s.fill();
-        // The first row: an app, the answer, or the search for what was
-        // typed; never a completion nobody picked (they come after it).
-        s.sel = 0;
+    }
+
+    fn listsHash(s: *const Nanolight) u64 {
+        var hash = std.hash.Wyhash.init(0);
+        for (s.found.entries[0..s.found.n]) |*e| hash.update(e.path());
+        for (s.dug.found.entries[0..s.dug.found.n]) |*e| hash.update(e.path());
+        for (0..s.web.n) |i| hash.update(s.web.get(i));
+        return hash.final();
     }
 
     pub fn fill(s: *Nanolight) void {
@@ -352,65 +393,108 @@ pub const Nanolight = struct {
         const ns = s.index.suggestions(&sug);
         var web: [suggest.max_rows][]const u8 = undefined;
         s.res.buildWithDigup(s.query.text(), s.index, sug[0..ns], s.web.slices(&web), &s.found, if (s.digup_on) s.dug.found.n else 0);
-    }
-
-    /// Google's completions of `typed` (what `Host.suggest` asked): kept,
-    /// and listed if it is still what is typed. The selection stays on the
-    /// row it was on, wherever that row now is: Return a moment after
-    /// typing does what the panel showed, not a completion that just came.
-    pub fn answered(s: *Nanolight, typed: []const u8, said: *const suggest.List) void {
-        s.cache.put(typed, said);
-        if (!suggest.same(typed, s.query.text())) return;
-        const was: ?Row = if (s.sel < s.res.n) s.res.rows[s.sel] else null;
-        var was_text: [suggest.max_len]u8 = undefined;
-        var was_len: usize = 0;
-        if (was) |r| if (r.kind == .suggest) {
-            const w = s.web.get(r.web);
-            @memcpy(was_text[0..w.len], w);
-            was_len = w.len;
-        };
-        s.web = said.*;
-        s.fill();
-        s.sel = 0;
-        const r = was orelse return;
-        for (s.res.slice(), 0..) |now, i| {
-            const same_row = now.kind == r.kind and switch (r.kind) {
-                .app, .pane => now.app == r.app,
-                .file, .digup_hit, .gmail => now.file == r.file,
-                .suggest => suggest.same(s.web.get(now.web), was_text[0..was_len]),
-                else => true,
-            };
-            if (same_row) {
-                s.sel = i;
-                return;
+        const handoffs = for (s.res.slice()) |r| {
+            if (r.kind == .quick_ask) break true;
+        } else false;
+        // Reserve the three handoffs even before any other rows arrive.
+        if (handoffs) {
+            s.numbers[0] = .{ .kind = .quick_ask };
+            s.numbers[1] = .{ .kind = .new_thread };
+            s.numbers[2] = .{ .kind = .digup };
+        }
+        for (s.res.rows[0..s.res.n]) |*r| {
+            r.key = s.makeKey(r.*);
+            for (&s.numbers, 0..) |*slot, i| {
+                if (slot.*) |key| {
+                    if (!key.eql(r.key)) continue;
+                } else slot.* = r.key;
+                r.number = @intCast(i + 1);
+                break;
             }
         }
+        s.res.stable_numbers = true;
+        s.filled_lists = s.listsHash();
+    }
+
+    fn makeKey(s: *const Nanolight, r: Row) results.RowKey {
+        return switch (r.kind) {
+            .app => .init(r.kind, s.index.apps.items[r.app].path),
+            .file => .init(r.kind, s.found.entries[r.file].path()),
+            .digup_hit => .init(r.kind, s.dug.found.entries[r.file].path()),
+            .suggest => .init(r.kind, s.web.get(r.web)),
+            .gmail => .init(r.kind, gmail.accounts[r.file].email),
+            .pane => .{ .kind = r.kind, .id = r.app },
+            else => .{ .kind = r.kind },
+        };
+    }
+
+    pub fn selectedKey(s: *const Nanolight) ?results.RowKey {
+        return if (s.sel < s.res.n) s.res.rows[s.sel].key else null;
+    }
+
+    /// Resolve last frame's identity against the current source lists.
+    pub fn rowByKey(s: *const Nanolight, key: results.RowKey) ?Row {
+        for (s.res.slice()) |r| {
+            if (!r.key.eql(key)) continue;
+            if ((r.kind == .file and r.file >= s.found.n) or
+                (r.kind == .digup_hit and r.file >= s.dug.found.n) or
+                (r.kind == .suggest and r.web >= s.web.n) or
+                (r.kind == .app and r.app >= s.index.apps.items.len)) return null;
+            if (s.makeKey(r).eql(key)) return r;
+        }
+        return null;
+    }
+
+    pub fn refill(s: *Nanolight) void {
+        s.refillSelected(s.selectedKey());
+    }
+
+    pub fn refillSelected(s: *Nanolight, was: ?results.RowKey) void {
+        s.fill();
+        s.sel = 0;
+        const key = was orelse return;
+        for (s.res.slice(), 0..) |r, i| if (r.key.eql(key)) {
+            s.sel = i;
+            return;
+        };
+    }
+
+    /// Only a successful Google answer may enter the completion cache.
+    pub fn googleAnswered(s: *Nanolight, generation: u64, said: ?*const suggest.List) void {
+        s.rebuild();
+        if (!s.suggest_on or !s.pipeline.finish(generation, .google, if (said != null) .answered else .failed)) return;
+        const was = s.selectedKey();
+        s.web = if (said) |said_list| said_list.* else .{};
+        if (said) |said_list| s.cache.put(s.query.text(), said_list);
+        s.refillSelected(was);
+    }
+
+    /// Synchronous compatibility for panel fixtures; workers pass generations.
+    pub fn answered(s: *Nanolight, typed: []const u8, said: *const suggest.List) void {
+        if (!suggest.same(typed, s.query.text())) return;
+        s.rebuild();
+        s.googleAnswered(s.pipeline.generation, said);
     }
 
     pub const filesAnswered = files_view.filesAnswered;
+    pub const filesAnsweredGeneration = files_view.filesAnsweredGeneration;
+
+    pub fn digupAnsweredGeneration(s: *Nanolight, generation: u64, found: ?*digup.List) void {
+        s.rebuild();
+        if (!s.digup_on or !s.pipeline.finish(generation, .digup, if (found != null) .answered else .failed)) return;
+        const was = s.selectedKey();
+        if (found) |found_list| s.dug.replace(found_list) else s.dug.deinit();
+        s.refillSelected(was);
+    }
 
     pub fn digupAnswered(s: *Nanolight, typed: []const u8, found: *digup.List) void {
-        if (!s.digup_on or !std.mem.eql(u8, typed, std.mem.trim(u8, s.query.text(), " \t\r\n"))) return;
-        const was: ?Row = if (s.sel < s.res.n) s.res.rows[s.sel] else null;
-        var path: [files.max_path]u8 = undefined;
-        var path_len: usize = 0;
-        if (was) |r| if (r.kind == .digup_hit) {
-            const p = s.dug.found.entries[r.file].path();
-            @memcpy(path[0..p.len], p);
-            path_len = p.len;
-        };
-        s.dug.replace(found);
-        // Google and handoff rows keep the same selection as hits arrive.
-        s.answered(s.query.text(), &s.web);
-        if (was) |r| if (r.kind == .digup_hit) {
-            s.sel = 0;
-            for (s.res.slice(), 0..) |now, i| {
-                if (now.kind == .digup_hit and std.mem.eql(u8, s.dug.found.entries[now.file].path(), path[0..path_len])) {
-                    s.sel = i;
-                    break;
-                }
-            }
-        };
+        if (!std.mem.eql(u8, typed, std.mem.trim(u8, s.query.text(), " \t\r\n"))) return;
+        s.rebuild();
+        s.digupAnsweredGeneration(s.pipeline.generation, found);
+    }
+
+    pub fn copied(s: *const Nanolight, time: f64) bool {
+        return s.copied_query != null and s.copied_query.? == std.hash.Wyhash.hash(0, s.query.text()) and time - s.copied_at < 1.4;
     }
 
     /// A real file behind a row; extension commands are not app bundles.
@@ -460,6 +544,7 @@ pub const Nanolight = struct {
         const d = ui.div(c).row().wFull().h(if (big) calc_h else row_h).px(10).gap(12).itemsCenter().control();
         defer d.end();
         s.row_ids[i] = d.id();
+        s.row_keys[i] = r.key;
         if (d.clicked()) {
             s.sel = i;
             s.activate(c);
@@ -536,7 +621,7 @@ pub const Nanolight = struct {
     }
 
     fn calcCard(s: *Nanolight, c: *ui.Context, p: Palette) void {
-        @import("calc_card.zig").draw(c, p, s.query.text(), s.res.answer, s.res.hex, c.time - s.copied_at < 1.4);
+        @import("calc_card.zig").draw(c, p, s.query.text(), s.res.answer, s.res.hex, s.copied(c.time));
     }
 
     /// The row's picture: the app's icon, or a symbol on a quiet tile.
@@ -649,6 +734,7 @@ pub const Nanolight = struct {
                 const v = @import("calc.zig").eval(s.query.text()) orelse return;
                 c.clipboard.write(c.clipboard.ctx, @import("calc.zig").format(&buf, v, false));
                 s.copied_at = c.time;
+                s.copied_query = std.hash.Wyhash.hash(0, s.query.text());
                 return;
             },
             .app => {
@@ -712,11 +798,24 @@ pub const Nanolight = struct {
     pub fn openPreviewOut(s: *Nanolight, current_url: ?[]const u8) void {
         if (!s.previewing) return;
         switch (s.preview_kind) {
-            .quick_ask => s.go(s.preview_answer),
+            .quick_ask => {
+                const h = s.host orelse return;
+                const move = h.move_answer orelse return s.go(s.preview_answer);
+                move(h.ctx);
+            },
             .digup, .codes => {},
             .search_web => s.go(current_url orelse s.preview_url),
             else => {},
         }
+    }
+
+    /// Quick Ask answered `move_answer`: the floating window has the
+    /// conversation now, or (not `ok`, e.g. an older helper) it asks again.
+    pub fn answerMoved(s: *Nanolight, ok: bool) void {
+        if (!s.previewing or s.preview_kind != .quick_ask) return;
+        const h = s.host orelse return;
+        s.back();
+        if (ok) h.hide(h.ctx) else s.go(s.preview_answer);
     }
 
     pub fn openSettings(s: *Nanolight) void {

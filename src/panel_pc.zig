@@ -38,10 +38,11 @@ pub fn focused(w: *nanoui.Window) bool {
 }
 
 var window: ?*nanoui.Window = null;
+pub var on_hide: ?struct { ctx: *anyopaque, func: *const fn (*anyopaque) void } = null;
 
 fn hideAway(ctx: *anyopaque) void {
-    const w: *nanoui.Window = @ptrCast(@alignCast(ctx));
-    if (w.isVisible()) w.hide();
+    _ = ctx;
+    if (on_hide) |h| h.func(h.ctx);
 }
 
 /// The panel's X window (0 before it is first shown, or off X11).

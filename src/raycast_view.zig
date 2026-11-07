@@ -36,6 +36,13 @@ pub const Ext = struct {
     name_buf: [96]u8 = undefined,
     name_len: usize = 0,
     icon: ?[]const u8 = null,
+    /// UI messages are owned until the next frame starts. Callbacks may
+    /// replace the entire view, so they must never run during drawing.
+    pending: std.ArrayList([]u8) = .empty,
+    generation: u64 = 0,
+    last_frame: ?u64 = null,
+    command_generation: u64 = 0,
+
     /// The top view and the arena it lives in (one per render).
     arena: ?std.heap.ArenaAllocator = null,
     view: ?model.View = null,
@@ -52,6 +59,7 @@ pub const Ext = struct {
     note_bad: bool = false,
     /// What the host is told.
     to: ?Sender = null,
+    tick: ?Sender = null,
     /// Item icons from files, read once.
     files: std.StringHashMapUnmanaged(?[]u8) = .empty,
     /// A form's text fields and switches, by the field's place.
@@ -67,7 +75,7 @@ pub const Ext = struct {
         const n = @min(name.len, e.name_buf.len);
         @memcpy(e.name_buf[0..n], name[0..n]);
         e.name_len = n;
-        e.icon = icon;
+        e.icon = if (icon) |bytes| e.gpa.dupe(u8, bytes) catch null else null;
         e.to = to;
         e.open = true;
         e.query.clear();
@@ -76,7 +84,15 @@ pub const Ext = struct {
     }
 
     pub fn stop(e: *Ext) void {
+        e.command_generation +%= 1;
+        e.generation +%= 1;
+        for (e.pending.items) |line| e.gpa.free(line);
+        e.pending.clearRetainingCapacity();
         e.open = false;
+        e.to = null;
+        e.tick = null;
+        if (e.icon) |bytes| e.gpa.free(bytes);
+        e.icon = null;
         e.view = null;
         if (e.arena) |*a| a.deinit();
         e.arena = null;
@@ -95,6 +111,7 @@ pub const Ext = struct {
             if (kv.value_ptr.*) |b| e.gpa.free(b);
         }
         e.files.deinit(e.gpa);
+        e.pending.deinit(e.gpa);
         e.query.deinit();
         for (&e.fields) |*f| f.deinit();
     }
@@ -103,6 +120,18 @@ pub const Ext = struct {
     pub fn show(e: *Ext, arena: std.heap.ArenaAllocator, v: model.View) void {
         // The old view lives in the old arena: read it before freeing that.
         const was_list = if (e.view) |old| old.isList() else true;
+        const old_id = if (e.view) |old| old.viewId else 0;
+        e.generation +%= 1;
+        if (v.viewId != old_id) {
+            e.sel = 0;
+            e.query.clear();
+            e.form_key = 0;
+            e.actions_open = false;
+        }
+        if (v.viewId != old_id or v.searchControlled) if (v.searchText) |text| {
+            if (!std.mem.eql(u8, e.query.text(), text)) e.query.set(text);
+            e.sent = std.hash.Wyhash.hash(0, text);
+        };
         e.view = v;
         if (e.arena) |*a| a.deinit();
         e.arena = arena;
@@ -127,10 +156,30 @@ pub const Ext = struct {
     }
 
     fn say(e: *Ext, kind: []const u8, field: ?[]const u8, value: anytype) void {
-        const to = e.to orelse return;
         var buf: [4096]u8 = undefined;
         const line = model.say(&buf, kind, field, value) catch return;
-        to.func(to.ctx, line);
+        e.enqueue(line);
+    }
+
+    fn enqueue(e: *Ext, line: []const u8) void {
+        if (e.to == null) return;
+        const view_id = if (e.view) |v| v.viewId else 0;
+        const owned = if (view_id == 0) e.gpa.dupe(u8, line) catch return else std.fmt.allocPrint(e.gpa, "{s},\"viewId\":{d}}}\n", .{ line[0 .. line.len - 2], view_id }) catch return;
+        e.pending.append(e.gpa, owned) catch e.gpa.free(owned);
+    }
+
+    /// Called before the next frame borrows any view data. Public for the
+    /// headless regression harness; no callback runs from keys or controls.
+    pub fn flushPending(e: *Ext) void {
+        const epoch = e.command_generation;
+        var pending = e.pending;
+        e.pending = .empty;
+        defer pending.deinit(e.gpa);
+        for (pending.items) |line| {
+            defer e.gpa.free(line);
+            if (epoch != e.command_generation) continue;
+            if (e.to) |to| to.func(to.ctx, line);
+        }
     }
 
     fn run(e: *Ext, a: model.Action) void {
@@ -173,6 +222,14 @@ pub const Ext = struct {
 
     /// The command in the panel (Nanolight.panel calls it while `open`).
     pub fn panel(e: *Ext, c: *ui.Context, n: *pview.Nanolight, p: Palette) void {
+        // nanoui can rebuild several times before painting one frame.
+        // A rebuild is not a lifetime boundary for borrowed view bytes.
+        if (e.last_frame == null or e.last_frame.? != c.frame) {
+            e.last_frame = c.frame;
+            if (e.tick) |tick| tick.func(tick.ctx, "");
+            e.flushPending();
+        }
+        if (!e.open) return;
         const h = n.follow(c, e.height());
         const body = ui.div(c).column().wFull().h(h).clip();
         defer body.end();
@@ -193,6 +250,7 @@ pub const Ext = struct {
         }
         mid.end();
         e.footer(c, p, acts);
+        if (e.pending.items.len > 0 or (e.view != null and e.view.?.loading)) c.animationFrame();
     }
 
     fn keys(e: *Ext, c: *ui.Context, acts: []const model.Action) void {
@@ -396,17 +454,19 @@ pub const Ext = struct {
         var h = std.hash.Wyhash.init(0);
         for (v.fields) |f| h.update(f.id);
         const key = h.final();
-        if (key == e.form_key) return;
+        const changed = key != e.form_key;
         e.form_key = key;
         var focused = false;
         for (v.fields[0..@min(v.fields.len, max_fields)], 0..) |f, i| {
-            switch (f.value) {
-                .string => |s| e.fields[i].set(s),
+            if (changed or f.controlled) switch (f.value) {
+                .string => |text| if (!std.mem.eql(u8, e.fields[i].text(), text)) {
+                    e.fields[i].set(text);
+                },
                 .bool => |b| e.checks[i] = b,
                 else => e.fields[i].clear(),
-            }
+            };
             // The first field typed into has the keys.
-            if (!focused and isTyped(f.type)) {
+            if (e.open and changed and !focused and isTyped(f.type)) {
                 e.fields[i].focus();
                 focused = true;
             }
@@ -455,7 +515,6 @@ pub const Ext = struct {
     }
 
     fn fieldValue(e: *Ext, id: []const u8, value: std.json.Value) void {
-        const to = e.to orelse return;
         var buf: [4096]u8 = undefined;
         var w: std.Io.Writer = .fixed(&buf);
         var s: std.json.Stringify = .{ .writer = &w };
@@ -468,7 +527,7 @@ pub const Ext = struct {
         s.write(value) catch return;
         s.endObject() catch return;
         w.writeByte('\n') catch return;
-        to.func(to.ctx, w.buffered());
+        e.enqueue(w.buffered());
     }
 
     fn actionList(e: *Ext, c: *ui.Context, p: Palette, acts: []const model.Action) void {

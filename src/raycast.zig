@@ -110,9 +110,9 @@ pub fn findNode(gpa: std.mem.Allocator, env: *const std.process.Environ.Map) ?[]
     while (it.next()) |d| if (exists(gpa, &.{ d, exe })) |p| return p;
     const home = env.get("HOME") orelse env.get("USERPROFILE") orelse "";
     const fixed = [_][]const []const u8{
-        &.{ "/opt/homebrew/bin", exe },     &.{ "/usr/local/bin", exe },
-        &.{ "/usr/bin", exe },              &.{ home, ".volta", "bin", exe },
-        &.{ home, ".bun", "bin", "node" },  &.{ env.get("ProgramFiles") orelse "C:\\Program Files", "nodejs", exe },
+        &.{ "/opt/homebrew/bin", exe },    &.{ "/usr/local/bin", exe },
+        &.{ "/usr/bin", exe },             &.{ home, ".volta", "bin", exe },
+        &.{ home, ".bun", "bin", "node" }, &.{ env.get("ProgramFiles") orelse "C:\\Program Files", "nodejs", exe },
     };
     for (fixed) |parts| if (exists(gpa, parts)) |p| return p;
     // nvm: the newest version there.
@@ -164,6 +164,107 @@ pub fn findHost(gpa: std.mem.Allocator, env: *const std.process.Environ.Map) ?[]
     return p;
 }
 
+/// Process ownership moves to a worker. No wait or kill-and-wait runs on
+/// the UI thread; the worker has no pointer into a command or view arena.
+pub const ProcessJob = struct {
+    refs: std.atomic.Value(u32) = .init(2),
+    done: std.atomic.Value(bool) = .init(false),
+    /// A stop asked for while the worker waits on a process that ended its
+    /// output but kept running.
+    cancelled: std.atomic.Value(bool) = .init(false),
+    term: ?std.process.Child.Term = null,
+    child: std.process.Child,
+    terminate: bool,
+    /// Only the UI callback reads/writes owner. The worker carries an
+    /// independent reference until delivery, including after deinit.
+    owner: ?*anyopaque = null,
+    completed: ?*const fn (*anyopaque) void = null,
+
+    pub fn start(child: std.process.Child, terminate: bool) ?*ProcessJob {
+        return startNotify(child, terminate, null, null);
+    }
+
+    pub fn startNotify(child: std.process.Child, terminate: bool, owner: ?*anyopaque, completed: ?*const fn (*anyopaque) void) ?*ProcessJob {
+        const job = std.heap.page_allocator.create(ProcessJob) catch return null;
+        job.* = .{ .child = child, .terminate = terminate, .owner = owner, .completed = completed };
+        const thread = std.Thread.spawn(.{}, work, .{job}) catch {
+            std.heap.page_allocator.destroy(job);
+            return null;
+        };
+        thread.detach();
+        return job;
+    }
+
+    /// From the UI thread: stops the process (SIGTERM, then SIGKILL ~2 s
+    /// later). A no-op once it has exited. On Windows the wait can't be
+    /// interrupted, so the process is left to finish.
+    pub fn cancel(job: *ProcessJob) void {
+        job.cancelled.store(true, .release);
+    }
+
+    /// The owner lets go: with `stop`, the process is stopped too.
+    pub fn drop(job: *ProcessJob, stop_it: bool) void {
+        if (stop_it) job.cancel();
+        job.owner = null;
+        job.release();
+    }
+
+    pub fn release(job: *ProcessJob) void {
+        if (job.refs.fetchSub(1, .acq_rel) == 1) std.heap.page_allocator.destroy(job);
+    }
+
+    fn work(job: *ProcessJob) void {
+        defer job.release();
+        var child = job.child;
+        const worker_io = std.Io.Threaded.global_single_threaded.io();
+        if (windows) {
+            if (job.terminate) child.kill(worker_io) else job.term = child.wait(worker_io) catch null;
+        } else if (child.id) |pid| {
+            var signalled = job.terminate;
+            if (signalled) _ = std.c.kill(pid, .TERM);
+            var status: c_int = 0;
+            var ticks: usize = 0;
+            var since: usize = 0;
+            while (true) {
+                const result = std.c.waitpid(pid, &status, std.c.W.NOHANG);
+                if (result == pid) {
+                    job.term = std.Io.Threaded.statusToTerm(@bitCast(status));
+                    break;
+                }
+                if (result < 0 and std.posix.errno(result) != .INTR) break;
+                // EOF is not an exit: a command that closed its output keeps
+                // working until it ends, unless a stop arrives meanwhile.
+                if (!signalled and job.cancelled.load(.acquire)) {
+                    _ = std.c.kill(pid, .TERM);
+                    signalled = true;
+                    since = ticks;
+                }
+                if (signalled and ticks - since == 100) _ = std.c.kill(pid, .KILL);
+                std.Io.sleep(worker_io, .fromMilliseconds(20), .awake) catch {};
+                ticks += 1;
+            }
+        }
+        if (!windows) {
+            if (child.stdin) |f| f.close(worker_io);
+            if (child.stdout) |f| f.close(worker_io);
+            if (child.stderr) |f| f.close(worker_io);
+        }
+        job.done.store(true, .release);
+        if (job.completed != null and !builtin.is_test) {
+            _ = job.refs.fetchAdd(1, .monotonic);
+            // From this worker: `after` needs the main thread on Windows.
+            nanoui.App.onMain(job, delivered);
+        }
+    }
+    fn delivered(ctx: ?*anyopaque) callconv(.c) void {
+        const job: *ProcessJob = @ptrCast(@alignCast(ctx.?));
+        defer job.release();
+        if (job.owner) |owner| if (job.completed) |completed| completed(owner);
+    }
+};
+
+pub const Lifecycle = enum { spawning, starting, running, closing, stopped };
+
 pub const Runner = struct {
     gpa: std.mem.Allocator,
     /// The app's (processes need a real one: the global single-threaded
@@ -173,30 +274,36 @@ pub const Runner = struct {
     hooks: Hooks,
     node: ?[]u8 = null,
     host: ?[]u8 = null,
+    state: Lifecycle = .stopped,
+    reaping: ?*ProcessJob = null,
     child: ?std.process.Child = null,
     watch: ?nanoui.fdwatch.Watch = null,
     line: std.ArrayList(u8) = .empty,
+    toast_id: ?i64 = null,
 
     /// Opens a row's command (`raycast:<dir>#<cmd>`) or the store.
     pub fn start(r: *Runner, path: []const u8, title: []const u8, ext_icon: ?[]const u8) void {
         r.stop();
+        r.state = .spawning;
         const node = r.node orelse return r.fail(title, "Raycast extensions need Node.js: install it from nodejs.org.");
         const host = r.host orelse return r.fail(title, "The Raycast host couldn't be written to SamSearch's cache.");
         var argv_buf: [6][]const u8 = undefined;
-        const root = dir(r.gpa) catch return;
-        defer r.gpa.free(root);
+        const root = if (split(path) == null) dir(r.gpa) catch return else null;
+        defer if (root) |value| r.gpa.free(value);
         const argv: []const []const u8 = if (split(path)) |s| blk: {
             argv_buf = .{ node, "--no-deprecation", host, "run", s.dir, s.cmd };
             break :blk &argv_buf;
         } else blk: {
-            argv_buf[0..5].* = .{ node, "--no-deprecation", host, "store", root };
+            argv_buf[0..5].* = .{ node, "--no-deprecation", host, "store", root.? };
             break :blk argv_buf[0..5];
         };
         r.ext.start(title, ext_icon, .{ .ctx = r, .func = send });
+        r.ext.tick = .{ .ctx = r, .func = tick };
         const child = std.process.spawn(r.io, .{ .argv = argv, .stdin = .pipe, .stdout = .pipe, .stderr = if (windows) .ignore else .inherit, .create_no_window = windows }) catch
             return r.fail(title, "Node.js couldn't be started.");
         const out = child.stdout.?;
         r.child = child;
+        r.state = .starting;
         r.watch = if (windows)
             nanoui.fdwatch.reader(out.handle, r, bytesIn, ended) catch null
         else
@@ -205,36 +312,94 @@ pub const Runner = struct {
     }
 
     fn fail(r: *Runner, title: []const u8, why: []const u8) void {
+        r.state = .closing;
         r.ext.start(title, null, .{ .ctx = r, .func = send });
         r.ext.note(why, true);
         var arena: std.heap.ArenaAllocator = .init(r.gpa);
-        const v: model.View = .{ .kind = "detail", .title = title, .markdown = arena.allocator().dupe(u8, why) catch "" };
+        const a = arena.allocator();
+        const v: model.View = .{ .kind = "detail", .title = a.dupe(u8, title) catch "", .markdown = a.dupe(u8, why) catch "" };
         r.ext.show(arena, v);
+        r.state = .stopped;
         r.hooks.redraw(r.hooks.ctx);
     }
 
     /// Ends the running command, if one is, and leaves its screen.
     pub fn stop(r: *Runner) void {
-        if (r.watch) |w| w.cancel();
-        r.watch = null;
-        if (r.child) |*c| {
-            if (c.stdin) |f| f.close(r.io);
-            c.stdin = null;
-            c.kill(r.io);
-        }
-        r.child = null;
-        r.line.clearRetainingCapacity();
-        if (r.ext.open) {
-            r.ext.stop();
-            r.hooks.redraw(r.hooks.ctx);
-        }
+        r.close(true);
+        if (r.reaping) |job| job.drop(true);
+        r.reaping = null;
+        if (r.ext.open) r.ext.stop();
+        r.hooks.redraw(r.hooks.ctx);
     }
 
-    fn send(ctx: *anyopaque, line: []const u8) void {
+    /// Hands the process to a worker. `stop_it`: an explicit stop (SIGTERM);
+    /// otherwise its output ended and it may still be finishing its work.
+    fn close(r: *Runner, stop_it: bool) void {
+        if (r.reaping) |job| job.drop(stop_it);
+        r.reaping = null;
+        r.state = .closing;
+        if (r.watch) |w| w.cancel();
+        r.watch = null;
+        // Consume already-buffered output before handing off the process.
+        if (!windows) if (r.child) |child| if (child.stdout) |out| {
+            var fds = [_]std.c.pollfd{.{ .fd = out.handle, .events = std.c.POLL.IN, .revents = 0 }};
+            var buf: [16 * 1024]u8 = undefined;
+            var drained: usize = 0;
+            while (drained < 4 * 1024 * 1024 and std.c.poll(&fds, 1, 0) > 0) {
+                drained += buf.len;
+                const n = std.c.read(out.handle, &buf, buf.len);
+                if (n <= 0) break;
+                r.feed(buf[0..@intCast(n)]);
+            }
+        };
+        if (r.line.items.len > 0) r.handle(r.line.items);
+        r.line.clearRetainingCapacity();
+        if (r.child) |child| {
+            r.reaping = ProcessJob.startNotify(child, stop_it, r, completed);
+        }
+        r.child = null;
+        if (r.reaping == null) r.state = .stopped;
+    }
+
+    fn completed(ctx: *anyopaque) void {
+        tick(ctx, "");
+    }
+
+    fn tick(ctx: *anyopaque, _: []const u8) void {
         const r: *Runner = @ptrCast(@alignCast(ctx));
-        const c = &(r.child orelse return);
+        const job = r.reaping orelse return;
+        if (!job.done.load(.acquire)) return;
+        job.owner = null;
+        job.release();
+        r.reaping = null;
+        r.state = .stopped;
+        if (r.ext.open) if (r.ext.view) |*v| {
+            v.loading = false;
+        };
+        r.hooks.redraw(r.hooks.ctx);
+    }
+
+    /// UI messages reach this only at the next frame's boundary.
+    pub fn send(ctx: *anyopaque, line: []const u8) void {
+        const r: *Runner = @ptrCast(@alignCast(ctx));
+        if (r.state == .closing) {
+            // Leaving a command still finishing its work stops it.
+            if (std.mem.indexOf(u8, line, "\"pop\"") != null) {
+                if (r.reaping) |job| job.cancel();
+                r.ext.stop();
+            }
+            return;
+        }
+        const c = &(r.child orelse {
+            if (std.mem.indexOf(u8, line, "\"pop\"") != null) r.ext.stop();
+            return;
+        });
         const f = c.stdin orelse return;
-        f.writeStreamingAll(r.io, line) catch r.stop();
+        f.writeStreamingAll(r.io, line) catch {
+            r.close(true);
+            if (!r.ext.note_bad) r.errorView("The extension host disconnected");
+            r.hooks.redraw(r.hooks.ctx);
+        };
     }
 
     fn readable(ctx: ?*anyopaque) callconv(.c) void {
@@ -251,19 +416,36 @@ pub const Runner = struct {
         r.feed(bytes);
     }
 
-    fn ended(ctx: ?*anyopaque) callconv(.c) void {
+    pub fn ended(ctx: ?*anyopaque) callconv(.c) void {
         const r: *Runner = @ptrCast(@alignCast(ctx));
-        r.stop();
-    }
-
-    fn feed(r: *Runner, bytes: []const u8) void {
-        r.line.appendSlice(r.gpa, bytes) catch return r.stop();
-        while (std.mem.indexOfScalar(u8, r.line.items, '\n')) |nl| {
-            r.handle(r.line.items[0..nl]);
-            if (r.child == null) return;
-            r.line.replaceRangeAssumeCapacity(0, nl + 1, &.{});
+        r.close(false);
+        if (r.ext.open and r.ext.view == null) {
+            var arena: std.heap.ArenaAllocator = .init(r.gpa);
+            const text = if (r.ext.note_len > 0) r.ext.note_buf[0..r.ext.note_len] else "Command finished";
+            const markdown = arena.allocator().dupe(u8, text) catch "";
+            r.ext.show(arena, .{ .kind = "detail", .markdown = markdown });
         }
         r.hooks.redraw(r.hooks.ctx);
+    }
+
+    pub fn feed(r: *Runner, bytes: []const u8) void {
+        r.line.appendSlice(r.gpa, bytes) catch return;
+        while (std.mem.indexOfScalar(u8, r.line.items, '\n')) |nl| {
+            // Remove before dispatch: a failed reply may close/drain the
+            // host recursively, and must never dispatch this line twice.
+            const line = r.gpa.dupe(u8, r.line.items[0..nl]) catch return;
+            r.line.replaceRangeAssumeCapacity(0, nl + 1, &.{});
+            r.handle(line);
+            r.gpa.free(line);
+        }
+        r.hooks.redraw(r.hooks.ctx);
+    }
+
+    fn errorView(r: *Runner, message: []const u8) void {
+        var arena: std.heap.ArenaAllocator = .init(r.gpa);
+        const text = arena.allocator().dupe(u8, message) catch "Extension error";
+        r.ext.show(arena, .{ .kind = "detail", .title = "Error", .markdown = text });
+        r.ext.note(message, true);
     }
 
     fn handle(r: *Runner, line: []const u8) void {
@@ -273,6 +455,7 @@ pub const Runner = struct {
             return;
         };
         const kind = m.type;
+        if (r.state == .starting) r.state = .running;
         if (std.mem.eql(u8, kind, "render")) if (m.view) |v| return r.ext.show(arena, v);
         defer arena.deinit();
         const h = r.hooks;
@@ -280,9 +463,20 @@ pub const Runner = struct {
             var buf: [200]u8 = undefined;
             const t = m.title orelse m.message orelse "";
             const text = if (m.title != null and m.message != null and m.message.?.len > 0) std.fmt.bufPrint(&buf, "{s}: {s}", .{ t, m.message.? }) catch t else t;
-            r.ext.note(text, std.mem.eql(u8, kind, "error") or std.mem.eql(u8, m.style orelse "", "failure"));
+            if (std.mem.eql(u8, kind, "error")) {
+                r.toast_id = null;
+                r.errorView(text);
+            } else {
+                r.toast_id = if (m.id) |id| (if (id == .integer) id.integer else null) else null;
+                r.ext.note(text, std.mem.eql(u8, m.style orelse "", "failure"));
+            }
+        } else if (std.mem.eql(u8, kind, "toast_hide")) {
+            const id = if (m.id) |value| (if (value == .integer) value.integer else null) else null;
+            if (id != null and id == r.toast_id) r.ext.note_len = 0;
         } else if (std.mem.eql(u8, kind, "hud")) {
-            r.ext.note(m.title orelse "", false);
+            // Hiding is the HUD's lifetime boundary. Never save it for a
+            // future panel show (possibly hours after this command).
+            r.ext.note_len = 0;
             h.hide(h.ctx);
         } else if (std.mem.eql(u8, kind, "open")) {
             if (m.target) |t| h.open(h.ctx, t);
@@ -294,8 +488,12 @@ pub const Runner = struct {
             h.hide(h.ctx);
         } else if (std.mem.eql(u8, kind, "installed")) {
             h.rescan(h.ctx);
-        } else if (std.mem.eql(u8, kind, "pop_to_root") or std.mem.eql(u8, kind, "exit")) {
-            r.stop();
+        } else if (std.mem.eql(u8, kind, "pop_to_root")) {
+            // Navigation leaves the extension screen, not its process.
+            r.ext.stop();
+        } else if (std.mem.eql(u8, kind, "exit")) {
+            // Keep watching through EOF: more output may follow this line.
+            r.state = .closing;
         } else if (std.mem.eql(u8, kind, "request")) {
             r.reply(m);
         }
@@ -303,9 +501,10 @@ pub const Runner = struct {
 
     fn reply(r: *Runner, m: model.Message) void {
         const id = m.id orelse return;
-        var out: [64 * 1024]u8 = undefined;
-        var w: std.Io.Writer = .fixed(&out);
-        var s: std.json.Stringify = .{ .writer = &w };
+        var out: std.Io.Writer.Allocating = .init(r.gpa);
+        defer out.deinit();
+        const w = &out.writer;
+        var s: std.json.Stringify = .{ .writer = w };
         const method = m.method orelse "";
         const clip = if (std.mem.eql(u8, method, "clipboard.readText")) r.hooks.read_clipboard(r.hooks.ctx, r.gpa) else null;
         defer if (clip) |c| r.gpa.free(c);
@@ -314,12 +513,18 @@ pub const Runner = struct {
         s.write("reply") catch return;
         s.objectField("id") catch return;
         s.write(id) catch return;
-        s.objectField("result") catch return;
-        // A confirmation is yes: the person chose the action that asks.
-        if (std.mem.eql(u8, method, "confirm")) s.write(true) catch return else s.write(clip) catch return;
+        if (std.mem.eql(u8, method, "confirm")) {
+            // There is no confirmation surface in this host yet. Reject
+            // rather than authorize an operation the user hasn't approved.
+            s.objectField("error") catch return;
+            s.write("confirmAlert is unavailable in SamSearch; confirmation was rejected") catch return;
+        } else {
+            s.objectField("result") catch return;
+            s.write(clip) catch return;
+        }
         s.endObject() catch return;
         w.writeByte('\n') catch return;
-        send(r, w.buffered());
+        send(r, out.written());
     }
 };
 

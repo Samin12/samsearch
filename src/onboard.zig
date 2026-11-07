@@ -31,6 +31,8 @@ pub const Hooks = struct {
     login: ?*const fn (ctx: *anyopaque, set: ?bool) bool = null,
     /// The welcome is over: keep that.
     done: *const fn (ctx: *anyopaque) void,
+    key_error: ?*const fn (ctx: *anyopaque) ?[]const u8 = null,
+    starting: ?*const fn (ctx: *anyopaque) void = null,
 };
 
 const Example = struct { q: []const u8, what: []const u8, icon: []const u8 };
@@ -61,6 +63,7 @@ pub const Onboard = struct {
     login: bool = false,
 
     pub fn start(o: *Onboard, choice: Choice) void {
+        if (o.hooks) |h| if (h.starting) |f| f(h.ctx);
         o.active = true;
         o.step = .key;
         o.choice = choice;
@@ -94,7 +97,7 @@ pub const Onboard = struct {
         return switch (o.step) {
             .key => 330 + @as(f32, if (c.clear()) 0 else 30),
             .try_it => 318,
-            .done => if (o.hooks != null and o.hooks.?.login != null) 396 else 350,
+            .done => if (o.hooks != null and o.hooks.?.login != null) 446 else 350,
         };
     }
 
@@ -202,6 +205,14 @@ pub const Onboard = struct {
     }
 
     fn tryStep(o: *Onboard, c: *ui.Context, p: Palette) void {
+        if (o.registrationError()) |message| {
+            const box = ui.div(c).column().wFull().px(28).pt(34).gap(16);
+            defer box.end();
+            ui.text(c, message, .{ .size = 13, .color = p.text });
+            ui.text(c, "Press Return to choose another shortcut, or Escape to skip.", .{ .size = 12, .color = p.sub });
+            if (c.input.key == .enter) o.next(c, .key);
+            return;
+        }
         if (o.reopened) {
             const at = o.reopened_at orelse blk: {
                 o.reopened_at = c.time;
@@ -298,13 +309,20 @@ pub const Onboard = struct {
         const h = o.hooks orelse return;
         const f = h.login orelse return;
         if (ui.toggle(c, "Open SamSearch when you log in", &o.login)) o.login = f(h.ctx, o.login);
+        if (mac and @import("login.zig").state() == .requires_approval) {
+            ui.text(c, "Approval needed in Login Items.", .{ .size = 12, .color = p.sub });
+            const button = ui.div(c).row().h(26).px(10).rounded(6).bg(p.tile).control();
+            if (button.clicked()) @import("login.zig").openSettings();
+            ui.text(c, "Open Login Items…", .{ .size = 12, .color = p.text });
+            button.end();
+        }
     }
 
     fn footer(o: *Onboard, c: *ui.Context, p: Palette) void {
         ui.div(c).wFull().h(1).bg(p.hair).end();
         const bar = ui.div(c).row().wFull().h(38).px(16).gap(8).itemsCenter();
         defer bar.end();
-        const n: usize = @intFromEnum(o.step);
+        const n: usize = @backingInt(o.step);
         for (0..3) |i| ui.div(c).w(if (i == n) 16 else 6).h(6).roundedFull().bg(if (i == n) p.text.alpha(0.7) else p.sub.alpha(0.3)).end();
         ui.textf(c, .{ .size = 12, .color = p.sub.alpha(0.8), .tabular = true }, "  {d} of 3", .{n + 1});
         ui.spacer(c);
@@ -326,13 +344,18 @@ pub const Onboard = struct {
         // This frame drew the old step: the new one is drawn now too.
         c.changed = true;
         c.animationFrame();
-        if (o.step == .key) if (o.hooks) |h| h.apply(h.ctx, o.choice);
+        if (o.step == .key and step == .try_it) if (o.hooks) |h| h.apply(h.ctx, o.choice);
         o.step = step;
+    }
+
+    pub fn registrationError(o: *const Onboard) ?[]const u8 {
+        const h = o.hooks orelse return null;
+        const f = h.key_error orelse return null;
+        return f(h.ctx);
     }
 
     /// Over: into the launcher, with `query` typed (a first search) or not.
     pub fn finish(o: *Onboard, s: *panel.Nanolight, query: []const u8) void {
-        if (o.step == .key) if (o.hooks) |h| h.apply(h.ctx, o.choice);
         o.active = false;
         if (o.hooks) |h| h.done(h.ctx);
         if (query.len > 0) s.query.set(query) else s.query.clear();

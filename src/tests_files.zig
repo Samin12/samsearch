@@ -249,3 +249,88 @@ test "file answers move icons only for the current enabled query" {
     s.rebuild();
     try t.expectEqual(@as(usize, 0), s.found.n);
 }
+
+test "file generations survive a repeated query and failed answers clear retained rows" {
+    const t = std.testing;
+    const files = @import("files.zig");
+    var ix: Index = .init(t.allocator);
+    defer ix.deinit();
+    var s: view.Nanolight = .{ .index = &ix, .files_on = true };
+    defer s.query.deinit();
+    defer s.found.deinit();
+    var found: files.List = .{ .allocator = t.allocator };
+    defer found.deinit();
+    found.add("/tmp/report", false, .{ .score = 1 });
+    s.query.set("report");
+    s.rebuild();
+    const old = s.pipeline.generation;
+    s.query.set("different");
+    s.rebuild();
+    s.query.set("report");
+    s.rebuild();
+    s.filesAnsweredGeneration(old, &found);
+    try t.expectEqual(@as(usize, 0), s.found.n);
+    try t.expectEqual(@as(usize, 1), found.n);
+    s.filesAnsweredGeneration(s.pipeline.generation, &found);
+    try t.expectEqual(@as(usize, 1), s.found.n);
+    s.filesAnsweredGeneration(s.pipeline.generation, null);
+    try t.expectEqual(@as(usize, 0), s.found.n);
+    try t.expectEqual(@import("search.zig").Status.failed, s.pipeline.status(.files));
+    for (s.res.slice()) |r| try t.expect(r.kind != .file);
+    var cancel: files.Cancel = .init(true);
+    try t.expect(!files.findCancelable(t.io, "report", "/tmp", "", &found, &cancel));
+}
+
+test "file row keys preserve selection and numbered shortcuts across list reordering" {
+    const t = std.testing;
+    const files = @import("files.zig");
+    var ix: Index = .init(t.allocator);
+    defer ix.deinit();
+    var s: view.Nanolight = .{ .index = &ix, .files_on = true };
+    defer s.query.deinit();
+    defer s.found.deinit();
+    s.query.set("report");
+    s.rebuild();
+    const google = s.res.rows[s.res.rowFor(4).?].key;
+    var found: files.List = .{ .allocator = t.allocator };
+    defer found.deinit();
+    found.add("/tmp/report a", false, .{ .score = 2 });
+    found.add("/tmp/report b", false, .{ .score = 1 });
+    s.filesAnsweredGeneration(s.pipeline.generation, &found);
+    try t.expect(google.eql(s.res.rows[s.res.rowFor(4).?].key));
+    s.sel = 1;
+    try t.expectEqual(results.Kind.file, s.res.rows[s.sel].kind);
+    const selected = s.selectedKey().?;
+    const number = s.res.number(s.sel);
+    found.add("/tmp/report b", false, .{ .score = 3 });
+    found.add("/tmp/report a", false, .{ .score = 1 });
+    s.filesAnsweredGeneration(s.pipeline.generation, &found);
+    try t.expect(selected.eql(s.selectedKey().?));
+    try t.expectEqual(number, s.res.number(s.sel));
+    try t.expectEqualStrings("/tmp/report b", s.filePath(s.rowByKey(selected).?).?);
+    s.found.deinit();
+    try t.expect(s.rowByKey(selected) == null);
+    s.rebuild();
+    for (s.res.slice()) |r| try t.expect(r.kind != .file);
+}
+
+test "refilling files keeps the selected Gmail account by identity" {
+    const t = std.testing;
+    const files = @import("files.zig");
+    var ix: Index = .init(t.allocator);
+    defer ix.deinit();
+    var s: view.Nanolight = .{ .index = &ix, .files_on = true };
+    defer s.query.deinit();
+    defer s.found.deinit();
+    s.query.set("gmail report");
+    s.rebuild();
+    s.sel = 1;
+    try t.expectEqual(results.Kind.gmail, s.res.rows[s.sel].kind);
+    const selected = s.selectedKey().?;
+    var found: files.List = .{ .allocator = t.allocator };
+    defer found.deinit();
+    found.add("/tmp/gmail report", false, .{ .score = 1 });
+    s.filesAnsweredGeneration(s.pipeline.generation, &found);
+    try t.expect(selected.eql(s.selectedKey().?));
+    try t.expectEqual(@as(u8, 1), s.res.rows[s.sel].file);
+}

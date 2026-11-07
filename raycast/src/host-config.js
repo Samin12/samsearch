@@ -57,7 +57,7 @@ const hostConfig = {
     return null;
   },
   detachDeletedInstance() {},
-  clearContainer() {},
+  clearContainer(container) { container.root = null; },
   appendChild(parent, child) {
     parent.children.push(child);
   },

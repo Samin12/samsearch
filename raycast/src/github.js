@@ -18,14 +18,14 @@ const UA = "nanolight-raycast-host";
 const API = "https://api.github.com/repos/" + REPO;
 const RAW = "https://raw.githubusercontent.com/" + REPO + "/";
 
-function request(url, headers, redirects) {
+function request(url, headers, redirects, signal) {
   const left = redirects == null ? 5 : redirects;
   return new Promise((resolve, reject) => {
-    const req = https.get(url, { headers: Object.assign({ "User-Agent": UA }, headers || {}) }, (res) => {
+    const req = https.get(url, { headers: Object.assign({ "User-Agent": UA }, headers || {}), signal }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         res.resume();
         if (left <= 0) return reject(new Error("Too many redirects for " + url));
-        return resolve(request(new URL(res.headers.location, url).toString(), headers, left - 1));
+        return resolve(request(new URL(res.headers.location, url).toString(), headers, left - 1, signal));
       }
       const chunks = [];
       res.on("data", (c) => chunks.push(c));
@@ -55,8 +55,8 @@ function apiHeaders() {
   return h;
 }
 
-async function getJson(url) {
-  const { body } = await request(url, apiHeaders());
+async function getJson(url, signal) {
+  const { body } = await request(url, apiHeaders(), undefined, signal);
   return JSON.parse(body.toString("utf8"));
 }
 
@@ -72,10 +72,10 @@ function parseRef(input) {
 }
 
 /// The files of extensions/<name>: one API request.
-async function listFiles(name) {
+async function listFiles(name, signal) {
   let data;
   try {
-    data = await getJson(API + "/git/trees/" + BRANCH + ":extensions/" + encodeURIComponent(name) + "?recursive=1");
+    data = await getJson(API + "/git/trees/" + BRANCH + ":extensions/" + encodeURIComponent(name) + "?recursive=1", signal);
   } catch (err) {
     if (err.status === 404) throw new Error("No extension called " + name + " in raycast/extensions");
     throw err;
@@ -88,9 +88,10 @@ function skipped(p) {
   return p === "package-lock.json" || p === "metadata" || p.startsWith("metadata/") || p.startsWith("media/");
 }
 
-async function downloadExtension(name, destDir) {
+async function downloadExtension(name, destDir, signal) {
   const ref = parseRef(name);
-  const { sha, files } = await listFiles(ref.name);
+  const { sha, files } = await listFiles(ref.name, signal);
+  signal?.throwIfAborted();
   fs.mkdirSync(destDir, { recursive: true });
   const todo = files.filter((f) => !skipped(f.path));
   // Six at a time.
@@ -99,7 +100,8 @@ async function downloadExtension(name, destDir) {
     while (next < todo.length) {
       const f = todo[next++];
       const url = RAW + BRANCH + "/extensions/" + encodeURIComponent(ref.name) + "/" + f.path.split("/").map(encodeURIComponent).join("/");
-      const { body } = await request(url);
+      const { body } = await request(url, undefined, undefined, signal);
+      signal?.throwIfAborted();
       const dest = path.join(destDir, ...f.path.split("/"));
       fs.mkdirSync(path.dirname(dest), { recursive: true });
       fs.writeFileSync(dest, body);

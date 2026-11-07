@@ -157,7 +157,6 @@ pub fn modifiers(choice: Choice) c_uint {
 }
 
 pub fn register(choice: Choice, on: Pressed) !void {
-    pressed = on;
     if (unavailable() != null) return error.Wayland;
     const xl = load() orelse return error.NoX11;
     const d = open(xl) orelse return error.NoDisplay;
@@ -165,11 +164,11 @@ pub fn register(choice: Choice, on: Pressed) !void {
     const code: c_int = xl.XKeysymToKeycode(d, xk_space);
     // Caps Lock and Num Lock are modifiers too: grab with each.
     const extra = [_]c_uint{ 0, lock_mask, mod2_mask, lock_mask | mod2_mask };
-    if (grabbed) |m| for (extra) |e| {
-        _ = xl.XUngrabKey(d, code, m | e, root);
-    };
-    grabbed = null;
     const m = modifiers(choice);
+    if (grabbed == m) {
+        pressed = on;
+        return;
+    }
     // Another client holding the key answers BadAccess, asynchronously:
     // caught here, with GDK's handler put back after.
     failed = false;
@@ -182,7 +181,11 @@ pub fn register(choice: Choice, on: Pressed) !void {
         _ = xl.XSync(d, 0);
         return error.HotKeyTaken;
     }
+    if (grabbed) |old| for (extra) |e| {
+        _ = xl.XUngrabKey(d, code, old | e, root);
+    };
     grabbed = m;
+    pressed = on;
 }
 
 /// Whether another client (the window manager: Alt Space is its window
@@ -209,4 +212,15 @@ pub fn taken(choice: Choice) bool {
 test "the choices' modifiers" {
     try std.testing.expectEqual(mod1_mask, modifiers(.cmd_space));
     try std.testing.expectEqual(control_mask | shift_mask, modifiers(.opt_cmd_space));
+}
+
+pub fn unregister() void {
+    const m = grabbed orelse return;
+    const xl = x orelse return;
+    const d = dpy orelse return;
+    const code: c_int = xl.XKeysymToKeycode(d, xk_space);
+    for ([_]c_uint{ 0, lock_mask, mod2_mask, lock_mask | mod2_mask }) |e|
+        _ = xl.XUngrabKey(d, code, m | e, xl.XDefaultRootWindow(d));
+    _ = xl.XSync(d, 0);
+    grabbed = null;
 }
