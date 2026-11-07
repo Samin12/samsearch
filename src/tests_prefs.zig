@@ -408,6 +408,8 @@ test "login approval is visible and login status is cached until Settings shows 
 }
 
 test "Settings source toggles immediately invalidate results and request each source once" {
+    // The DigUp and Files rows are the Mac's.
+    if (!mac) return error.SkipZigTest;
     var ix: Index = .init(std.testing.allocator);
     defer ix.deinit();
     var prefs: StatefulPrefs = .{};
