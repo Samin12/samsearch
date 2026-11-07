@@ -9,8 +9,19 @@ cd "$(dirname "$0")/.."
 LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 IDENTITY="${CODESIGN_IDENTITY:-$(security find-identity -v -p codesigning | awk -F'"' '/Apple Development/{print $2; exit}')}"
 
-version="${VERSION:-$(git describe --tags 2>/dev/null || git tag --sort=-version:refname | head -n 1)}"
-version="${version#v}"
+# The updater only compares plain dotted numbers: the last tag, plus how many
+# commits since as a fourth part (0.2.6.18), sorts after that release and
+# before the next one. "0.2.6-18-g…" would never update again.
+if [ -z "${VERSION:-}" ]; then
+  tag="$(git describe --tags --abbrev=0 2>/dev/null || git tag --sort=-version:refname | head -n 1)"
+  since="$(git rev-list --count "$tag"..HEAD 2>/dev/null || echo 0)"
+  VERSION="${tag#v}"
+  [ "$since" -gt 0 ] && VERSION="$VERSION.$since"
+fi
+version="${VERSION#v}"
+case "$version" in
+  *[!0-9.]*) echo "Version '$version' isn't plain dotted numbers; the updater would ignore it." >&2; exit 1 ;;
+esac
 if [ -z "$version" ]; then
   echo "No version tag found; set VERSION explicitly before installing." >&2
   exit 1
