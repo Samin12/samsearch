@@ -29,6 +29,8 @@ test {
     _ = @import("tests_prefs.zig");
     _ = @import("tests_files.zig");
     _ = @import("tests_digup.zig");
+    _ = @import("tests_panel.zig");
+    _ = @import("tests_account.zig");
     switch (@import("builtin").os.tag) {
         .macos => {
             _ = @import("single_mac.zig");
